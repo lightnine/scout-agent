@@ -66,7 +66,7 @@ sequenceDiagram
     M-->>A: Top-K 相关记忆
     loop 最多 max_steps 步
         A->>A: 检查 token，超阈值则压缩上下文
-        A->>A: 重新组装 system prompt<br/>(准则 + 计划 + 来源清单 + 记忆)
+        A->>A: 重新组装 messages<br/>(静态 system + 历史 + runtime reminder)
         A->>L: chat(messages, tools)
         L-->>A: 文本 / tool_calls
         alt 没有 tool_calls
@@ -217,25 +217,125 @@ def _safe_split_index(self) -> int:
 
 ## 7. 上下文工程
 
-System prompt 分两部分，每一步都重新组装：
+Agent 的上下文不是「设一次 system 就完事」，而是 **Agent Loop 每一步调 LLM 前** 由 `Agent._assemble()` 临时拼好整包请求。`WorkingMemory` 只存 user / assistant / tool 对话；system、runtime reminder 都不入库。
+
+### 7.1 何时组装、组装什么
+
+用户一次提问触发一次 `run()`，内部可能 loop 十几步。**每一步**的顺序是：
 
 ```
-静态部分（写死在 prompts.py）
-├── 角色与工作流程（拆解 → 搜集 → 交叉验证 → 综合 → 产出）
-├── 工具使用原则（并行调用、何时派子 Agent、失败怎么办）
-├── 引用规范（每条事实标注来源、推测要显式标明、禁止编造 URL）
-└── 输出风格（结论先行、不确定就说不确定）
-
-动态部分（每步重新生成）
-├── 运行环境（时间、工作区、搜索后端、步数上限、子 Agent 配额）
-├── 召回的长期记忆
-├── 当前调研计划（[x] 已完成 / [>] 进行中 / [ ] 待办）
-└── 已收录来源清单（[S1] 标题 …）
+_maybe_compact()          → token 超阈值则压缩 working memory
+_assemble()               → 拼 messages
+llm.chat(messages, tools) → 发请求
+working.add(assistant)    → 工具结果写回 working memory
 ```
 
-**为什么动态状态放 system prompt 而不是塞进对话历史**：放在历史里会被压缩冲掉，而且会随着轮次增多变成一堆过期副本。放在每步重新生成的 system 里，模型看到的永远是最新状态，且只占一份空间。
+对应代码：`core/agent.py` 主循环 + `core/prompts.py` 组装函数。
 
-计划本身也是一种外置记忆——写下来的步骤不受上下文压缩影响，是把长任务拉回正轨的锚点。
+### 7.2 完整 API 请求结构
+
+一次 LLM 调用由 **messages 数组** 和 **tools 数组** 两部分组成（OpenAI 兼容协议）：
+
+```mermaid
+graph TB
+    subgraph 请求体_从稳定到易变
+        SYS["[1] system<br/>build_static_system_prompt()<br/>整轮 run 不变"]
+        WM["[2] working memory<br/>user → assistant → tool → …<br/>append-only"]
+        REM["[3] user runtime reminder<br/>build_runtime_reminder()<br/>每步重新生成"]
+        FIN["[4] user FORCE_FINAL<br/>仅最后一步"]
+    end
+    TOOLS["tools: registry.cached_schemas()<br/>memoize + 按名称排序<br/>整轮 run 不变"]
+
+    SYS --> WM --> REM
+    REM -.-> FIN
+    TOOLS -.独立字段.-> API["/chat/completions"]
+    SYS --> API
+    WM --> API
+    REM --> API
+```
+
+| 部分 | 代码入口 | 整轮 run 内是否变化 | 持久化 |
+| --- | --- | --- | --- |
+| static system | `build_static_system_prompt()` | **否** | 否，每步重新生成但内容相同 |
+| tools schema | `ToolRegistry.cached_schemas()` | **否** | 否，API 独立字段 |
+| working memory | `WorkingMemory.messages` | append-only | 是，写入 SQLite messages |
+| runtime reminder | `build_runtime_reminder()` | **是**（每步） | 否，仅当次请求 |
+| FORCE_FINAL | `FORCE_FINAL` 常量 | 仅最后一步 | 否 |
+
+### 7.3 static system 里有什么
+
+`build_static_system_prompt()` = `LEAD_SYSTEM` + 固定运行环境（`_static_runtime_block`）：
+
+```
+LEAD_SYSTEM（prompts.py 写死）
+├── 工作流程：拆解 → 搜集 → 交叉验证 → 综合 → 产出
+├── 工具使用原则：并行只读、派子 Agent、失败自愈、remember
+├── 引用规范：[S1] 标注、推测显式标明、禁止编造 URL
+└── 输出风格：中文、结论先行、不确定就说不确定
+
+运行环境（固定部分）
+├── 工作区路径
+├── 搜索后端
+├── 本轮步数上限
+└── 可用工具名称列表
+```
+
+子调研员（`role=worker`）用 `build_worker_static_prompt()`，只含 `WORKER_SYSTEM`，不含计划/来源/长期记忆。
+
+### 7.4 runtime reminder 里有什么
+
+volatile 状态放在 messages **末尾** 的一条 `role=user` 消息里，以 `【当前运行时状态】` 开头（`RUNTIME_REMINDER_MARKER`）：
+
+```
+build_runtime_reminder()  ← 主调研员
+├── 运行环境（实时）：任务开始时间、子 Agent 配额
+├── 长期记忆：run() 开始时 _recall() 一次，整轮复用
+├── 当前调研计划：session.plan.render()
+├── 已收录来源：session.evidence.sources()（最多 20 个）
+└── 「请基于以上最新状态继续任务。」
+
+build_worker_runtime_reminder()  ← 子调研员（更短）
+├── 任务开始时间
+└── 搜索后端
+```
+
+**长期记忆**在 `run()` 入口 `_recall(user_input)` 召回 Top-5，之后 13 步共用同一份，不会每步重新检索。
+
+### 7.5 设计取舍
+
+**为什么 volatile 状态放 reminder 而不是 system？**
+
+Provider 的 prefix cache 按前缀字节匹配。若计划、来源清单写进 system，每抓一个网页 system 就变，前面的大段前缀 cache 全部失效。静态 system + append-only 历史 + 末尾 reminder，只有 suffix 在变（Claude Code / Cursor 同款思路）。
+
+**为什么 reminder 不放进 working memory？**
+
+它是「当前状态快照」，不是对话内容。不持久化、不参与压缩，避免历史里堆叠过期副本。
+
+**计划为什么仍有效？**
+
+计划存在 `session.plan`（外置状态），每步通过 reminder 注入最新渲染结果，不受上下文压缩影响，是把长任务拉回正轨的锚点。
+
+### 7.6 Prefix cache 与 tools cache block
+
+智谱 GLM（`open.bigmodel.cn`）等平台提供**隐式**上下文缓存，无需 `cache_control`。前缀（static system + tools + 已有对话）一致即可命中。响应字段 `usage.prompt_tokens_details.cached_tokens`；`llm_end` trace 事件同步记录 `cached_tokens`。详见[智谱官方文档](https://docs.bigmodel.cn/cn/guide/capabilities/cache)。
+
+Scout 的三层 cache-friendly 布局：
+
+| 层 | 作用 |
+| --- | --- |
+| static system | 角色准则 + 固定环境，整 run 字节级不变 |
+| `cached_schemas()` | 工具 schema memoize 并按名称排序，避免 dict 顺序抖动导致 cache miss |
+| append-only 历史 | 每步只追加 assistant / tool，前缀随步数增长但旧部分不变 |
+
+**注意**：上下文压缩（§6.1）会用摘要替换 early history，会打断 prefix cache——这是省 token 的必要代价。压缩只动 working memory，不动 SQLite 完整记录。
+
+验证 cache 命中：
+
+```bash
+jq -r 'select(.type=="llm_end") | "\(.step) prompt=\(.prompt_tokens) cached=\(.cached_tokens)"' .scout/traces.jsonl
+```
+
+Step 1 通常 `cached=0`（冷启动）；Step 2+ 在布局正确时应看到 `cached_tokens` 上升。
 
 ## 8. 多 Agent 编排
 
@@ -254,13 +354,102 @@ graph TB
 
 一个子课题往往要搜 3 次、抓 5 个网页，几万 token 的原始资料如果全进主上下文，主 Agent 很快就"失忆"。派子 Agent 去做，它在自己的上下文里翻完所有资料，只把 800 字的结论带回来。主上下文只承担摘要的成本，而**抓到的证据沉淀在共享证据库里，主 Agent 照样能引用 `[S3]`**。
 
-三条约束：
+### 8.1 什么时候会派生子 Agent
+
+**没有自动触发**——只有主 Agent 的 LLM 在某一步 **主动调用 `research_subtopic` 工具** 时才会派生。系统不会在后台偷偷开子 Agent。
+
+主 Agent 的 system 准则里写了典型场景（`prompts.LEAD_SYSTEM`）：
+
+> 子课题工作量大时，用 `research_subtopic` 派子调研员去做。它有独立的上下文，只把结论带回来。
+
+适合派子的判断（由模型自行决定，代码不做硬编码）：
+
+| 适合派子 Agent | 不适合派子 Agent |
+| --- | --- |
+| 子课题需要多次搜索、抓取、阅读 | 简单事实查一下就能答 |
+| 原始资料很多，但主 Agent 只需要一段结论 | 主 Agent 自己几步就能查完 |
+| 可拆成彼此独立的 parallel 子课题 | 强依赖主上下文才能理解的任务 |
+
+**硬约束（代码层）**——即使模型想派，以下情况也会被拦：
+
+| 条件 | 行为 |
+| --- | --- |
+| `session.subagents_used >= max_subagents`（默认 3） | 工具返回失败，提示配额用完 |
+| 子 Agent 内部 | 没有 `research_subtopic` 工具，**不能递归派生** |
+| `ctx.spawn` 未注入 | 工具返回「当前运行环境不支持子 Agent」 |
+
+同一轮里模型可同时请求多个 `research_subtopic`（工具标记 `concurrency_safe=True`），`ToolRegistry.execute_batch` 会 **ThreadPool 并行** 派多个子 Agent。
+
+### 8.2 主 Agent 与子 Agent 如何通信
+
+Scout **不用**消息队列、共享内存或 Agent 间直接对话。通信路径是：**工具调用 + 共享 Session 对象**。
+
+```mermaid
+sequenceDiagram
+    participant M as 主 Agent
+    participant T as research_subtopic
+    participant S as spawn(brief)
+    participant W as 子 Agent worker-N
+    participant EV as 共享 EvidenceStore
+
+    M->>T: tool_call(topic, questions?)
+    T->>T: 拼 brief = topic + 问题清单
+    T->>S: ctx.spawn(brief)
+    S->>W: 新建 Agent(role=worker)<br/>worker.run(brief)
+    Note over W: 独立 WorkingMemory<br/>看不到主 Agent 对话历史
+    W->>EV: fetch_url → ingest（共享 session）
+    W-->>S: result.text（≤800 字结论）
+    S-->>T: summary 字符串
+    T-->>M: ToolResult → role=tool 消息写回主上下文
+    M->>EV: search_evidence / 引用 [S1]
+```
+
+#### 主 → 子：只传 `brief` 字符串
+
+1. 主 Agent 调用 `research_subtopic(topic, questions?)`
+2. 工具拼成 `brief`（课题描述 + 可选问题清单）
+3. `ctx.spawn(brief)` → `make_spawner()` 创建子 `Agent` 并 `worker.run(brief)`
+
+**子 Agent 看不到**：主 Agent 的 working memory、之前的 tool 输出、runtime reminder 里的计划/来源清单。
+
+**所以 `topic` 参数必须把背景写清楚**——工具 docstring 也强调了这一点。
+
+#### 子 → 主：只回传最终文本
+
+1. 子 Agent loop 结束，`result.text` 作为 spawn 返回值
+2. 包装成 `ToolResult`：`子调研员关于「xxx」的结论：\n\n{summary}`
+3. 以普通 **`role=tool` 消息** 写回主 Agent 的 working memory
+
+主 Agent 在后续 step 里把这段 tool 消息当作「观察结果」，和搜网页、读文件的结果一样处理。**没有结构化 RPC，没有子 Agent 的中间步骤回传。**
+
+#### 共享 vs 隔离
+
+| 资源 | 主 Agent | 子 Agent | 说明 |
+| --- | --- | --- | --- |
+| `WorkingMemory` | 独立 | 独立 | 上下文隔离的核心 |
+| `Session.evidence` | 共享 | 共享 | 子 Agent 抓的网页主 Agent 可 `[S1]` 引用 |
+| `Session.plan` | 共享对象 | 不可写 | 子 Agent 无 `update_plan` 工具 |
+| `Session.subagents_used` | 共享计数 | 派生时 +1 | 配额全局累计 |
+| `EventBus` | 共享 | 共享 | trace / CLI 可看到 `(worker-0)` 前缀 |
+| SQLite messages | 主 persist | **不 persist** | 子 Agent `persist=False`，中间过程不入库 |
+| 工具集 | 全部 13 个 | 4 个只读 | `SUBAGENT_TOOLS` |
+
+#### 代码入口
+
+| 环节 | 位置 |
+| --- | --- |
+| 工具定义 | `tools/delegate.py::research_subtopic` |
+| 派生逻辑 | `core/agent.py::make_spawner` → `spawn(brief)` |
+| spawn 注入 | `runtime.py::build_agent` → `ctx.spawn = agent.make_spawner()` |
+| 子 Agent 工具白名单 | `tools/__init__.py::SUBAGENT_TOOLS` |
+
+### 8.3 三条约束（配置层）
 
 1. **能力收窄**：子 Agent 只有 `web_search / fetch_url / search_evidence / read_file`，不能写文件、不能派生下一级子 Agent（避免递归失控）
-2. **配额限制**：`max_subagents` 默认 3，用完后工具返回明确提示让主 Agent 自己完成
-3. **模型分级**：子 Agent 调用量最大，可以通过 `LLM_FAST_MODEL` 单独指定便宜的小模型
+2. **配额限制**：`max_subagents` 默认 3（`AGENT_MAX_SUBAGENTS`），用完后工具返回明确提示让主 Agent 自己完成
+3. **模型分级**：子 Agent 调用量最大，可以通过 `LLM_FAST_MODEL` 单独指定便宜的小模型；步数上限 `AGENT_SUBAGENT_MAX_STEPS` 默认 12
 
-同一轮里派出的多个子 Agent 会并行执行（`research_subtopic` 标记为 concurrency_safe）。
+同一轮里派出的多个子 Agent 会并行执行（`research_subtopic` 标记为 `concurrency_safe`）。
 
 ## 9. 可观测性
 
@@ -314,7 +503,7 @@ runtime_factory([
 - **协议正确性**：每个 tool_call 都有对应的 tool 消息（并行调用也是）
 - **重复保护**：第 4 次完全相同的调用被拦截
 - **子 Agent**：使用独立的 system prompt 和工作记忆、配额生效
-- **记忆**：长期记忆注入 system prompt、计划出现在下一步的 prompt 里
+- **记忆**：长期记忆注入 runtime reminder、计划出现在下一步的 reminder 里
 - **压缩**：token 下降、不切断工具调用链、原始任务原文保留
 - **解析**：DuckDuckGo 两套页面布局、Tavily/Serper JSON、HTML 正文提取
 - **权限**：readonly 拦截副作用、用户拒绝的原因回传给模型

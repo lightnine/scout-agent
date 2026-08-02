@@ -1,8 +1,11 @@
 """提示词组装。
 
-System prompt 分两部分：**静态的行为准则**（写死在这里）和 **动态的运行时状态**
-（每一步重新生成）。动态部分放在 system 消息末尾而不是塞进对话历史，
-这样计划、记忆、证据统计永远是最新的，也不会被上下文压缩冲掉。
+业内 prompt-cache 友好做法：
+- **静态前缀**（system）：角色准则、工具原则、固定运行环境 —— 整轮 run 内字节级不变
+- **动态状态**（runtime reminder）：计划、来源、配额、长期记忆 —— 追加在 messages **末尾**
+
+这样多步 Agent 循环里，前缀 [system][user][assistant/tool…] 可命中 provider 的 prefix cache；
+只有末尾 reminder 和新增对话需要重新计算。
 """
 
 from __future__ import annotations
@@ -13,6 +16,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..memory.semantic import MemoryHit
     from .session import Session
+
+RUNTIME_REMINDER_MARKER = "【当前运行时状态】"
 
 LEAD_SYSTEM = """你是 Scout，一个严谨的调研助手。你的产出会被人当作决策依据，因此**可追溯**比**看起来完整**更重要。
 
@@ -68,14 +73,23 @@ FORCE_FINAL = """（系统提示：已达到本轮的最大步数限制，不能
 不要再尝试调用工具。）"""
 
 
-def build_system_prompt(
+def build_static_system_prompt(settings, tool_names: list[str] | None = None) -> str:
+    """整轮 run 内保持不变的 system 前缀，便于 prefix cache。"""
+    return "\n\n".join([LEAD_SYSTEM, _static_runtime_block(settings, tool_names)])
+
+
+def build_runtime_reminder(
     session: Session,
     settings,
     memories: list[MemoryHit] | None = None,
-    tool_names: list[str] | None = None,
+    *,
+    run_started_at: str,
 ) -> str:
-    """静态准则 + 运行时状态。"""
-    parts = [LEAD_SYSTEM, _runtime_block(session, settings, tool_names)]
+    """每步可能变化的运行时状态，追加在 messages 末尾。"""
+    parts = [
+        RUNTIME_REMINDER_MARKER,
+        _volatile_runtime_block(session, settings, run_started_at),
+    ]
 
     if memories:
         recalled = "\n".join(f"- {m.content}" for m in memories)
@@ -95,26 +109,43 @@ def build_system_prompt(
             f"## 已收录来源（{len(sources)} 个，证据片段 {session.evidence.count()} 条）\n{listing}"
         )
 
+    parts.append("请基于以上最新状态继续任务。")
     return "\n\n".join(parts)
 
 
-def build_worker_prompt(settings) -> str:
+def build_worker_static_prompt(settings) -> str:
+    """子调研员 static system —— run 内不变。"""
+    return WORKER_SYSTEM
+
+
+def build_worker_runtime_reminder(settings, *, run_started_at: str) -> str:
     return (
-        WORKER_SYSTEM
-        + f"\n\n当前时间：{time.strftime('%Y-%m-%d %H:%M')}"
-        + f"\n搜索后端：{getattr(settings, 'search_provider', 'duckduckgo')}"
+        f"{RUNTIME_REMINDER_MARKER}\n"
+        f"- 当前时间：{run_started_at}\n"
+        f"- 搜索后端：{getattr(settings, 'search_provider', 'duckduckgo')}"
     )
 
 
-def _runtime_block(session: Session, settings, tool_names: list[str] | None) -> str:
+def _static_runtime_block(settings, tool_names: list[str] | None) -> str:
     lines = [
         "## 运行环境",
-        f"- 当前时间：{time.strftime('%Y-%m-%d %H:%M %A')}",
         f"- 工作区：{settings.workspace}",
         f"- 搜索后端：{getattr(settings, 'search_provider', 'duckduckgo')}",
         f"- 本轮步数上限：{settings.max_steps}",
-        f"- 子调研员配额：{session.subagents_used}/{settings.max_subagents} 已使用",
     ]
     if tool_names:
         lines.append(f"- 可用工具：{', '.join(tool_names)}")
     return "\n".join(lines)
+
+
+def _volatile_runtime_block(session: Session, settings, run_started_at: str) -> str:
+    lines = [
+        "## 运行环境（实时）",
+        f"- 任务开始时间：{run_started_at}",
+        f"- 子调研员配额：{session.subagents_used}/{settings.max_subagents} 已使用",
+    ]
+    return "\n".join(lines)
+
+
+def format_run_timestamp(when: float | None = None) -> str:
+    return time.strftime("%Y-%m-%d %H:%M %A", time.localtime(when or time.time()))

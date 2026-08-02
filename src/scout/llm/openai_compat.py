@@ -16,6 +16,7 @@ from typing import Any
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 
 from .base import DeltaHandler, LLMResponse, Message, ToolCall, Usage
+from .cache import read_cached_tokens
 
 RETRIABLE = (RateLimitError, APIConnectionError, APITimeoutError)
 MAX_RETRIES = 3
@@ -88,6 +89,7 @@ class OpenAICompatClient:
         usage = Usage(
             prompt_tokens=getattr(completion.usage, "prompt_tokens", 0) or 0,
             completion_tokens=getattr(completion.usage, "completion_tokens", 0) or 0,
+            cached_tokens=read_cached_tokens(completion.usage),
         )
         return LLMResponse(
             message=Message(role="assistant", content=msg.content or "", tool_calls=tool_calls),
@@ -112,6 +114,7 @@ class OpenAICompatClient:
                 usage = Usage(
                     prompt_tokens=chunk.usage.prompt_tokens or 0,
                     completion_tokens=chunk.usage.completion_tokens or 0,
+                    cached_tokens=read_cached_tokens(chunk.usage),
                 )
             if not chunk.choices:
                 continue

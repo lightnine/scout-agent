@@ -1,7 +1,7 @@
 """调研计划工具。
 
 计划本身也是一种"外置记忆"：写下来的步骤不会被上下文压缩冲掉，
-每一步都会重新注入到 system prompt 里，是把长任务拉回正轨的锚点。
+每一步都会重新注入到 runtime reminder 里，是把长任务拉回正轨的锚点。
 """
 
 from __future__ import annotations

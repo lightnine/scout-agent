@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from ..llm.cache import stable_tool_schemas
 from ..llm.base import ToolCall
 from .base import Tool, ToolContext, ToolResult
 
@@ -19,12 +20,14 @@ class ToolRegistry:
         self.approver = approver
         self.max_workers = max_workers
         self._tools: dict[str, Tool] = {}
+        self._cached_schemas: list[dict[str, Any]] | None = None
 
     # ------------------------------------------------------------ 注册/查询
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
             raise ValueError(f"工具重名：{tool.name}")
         self._tools[tool.name] = tool
+        self._cached_schemas = None
 
     def register_all(self, tools: Iterable[Tool]) -> None:
         for t in tools:
@@ -48,6 +51,12 @@ class ToolRegistry:
 
     def schemas(self) -> list[dict[str, Any]]:
         return [t.to_openai_schema() for t in self._tools.values()]
+
+    def cached_schemas(self) -> list[dict[str, Any]]:
+        """整轮 run 内 memoize + 按名称排序，作为独立的 tools cache block 发送。"""
+        if self._cached_schemas is None:
+            self._cached_schemas = stable_tool_schemas(self.schemas())
+        return self._cached_schemas
 
     # ---------------------------------------------------------------- 执行
     def execute(self, call: ToolCall) -> ToolResult:

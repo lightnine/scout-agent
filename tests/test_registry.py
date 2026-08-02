@@ -90,3 +90,11 @@ def test_subset_limits_available_tools(tmp_path):
     child = make_registry(tmp_path).subset(["slow_echo"])
     assert [t.name for t in child.tools] == ["slow_echo"]
     assert child.execute(ToolCall(id="1", name="mutate", arguments={"value": "x"})).ok is False
+
+
+def test_cached_schemas_sorted_and_memoized(tmp_path):
+    registry = make_registry(tmp_path)
+    first = registry.cached_schemas()
+    second = registry.cached_schemas()
+    assert first is second
+    assert [s["function"]["name"] for s in first] == ["huge", "mutate", "slow_echo"]

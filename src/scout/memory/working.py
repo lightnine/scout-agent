@@ -3,6 +3,8 @@
 上下文窗口是 Agent 最稀缺的资源。一次调研跑几十步、抓十几个网页，
 原始消息很快就会超窗。压缩的难点不在"叫模型总结一下"，
 而在**不能把工具调用链切断**——见 ``_safe_split_index``。
+
+system prompt 与 runtime reminder 由 Agent 每次调用前组装，不存放在这里。
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ class CompactionResult:
 
 @dataclass
 class WorkingMemory:
-    """一轮任务的消息序列。system prompt 不放这里，由 Agent 每次重新组装。"""
+    """一轮任务的消息序列（user / assistant / tool）。system 与 runtime reminder 由 Agent 组装。"""
 
     threshold: int = 16000
     keep_recent: int = 8

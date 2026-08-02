@@ -128,18 +128,18 @@ def test_parallel_tool_calls_all_get_responses(runtime_factory):
     assert tool_ids == {"x1", "x2"}, "每个 tool_call 都必须有对应的结果消息"
 
 
-def test_long_term_memory_is_injected_into_system_prompt(runtime_factory):
+def test_long_term_memory_is_injected_into_runtime_reminder(runtime_factory):
     runtime, llm, _, agent = runtime_factory([Message(role="assistant", content="好的。")])
     runtime.memory.save("用户在做数据平台，关注 Agent 落地", tags="画像")
 
     agent.run("我平时关注什么", stream=False)
 
-    system_prompt = llm.received[0][0].content
     assert llm.received[0][0].role == "system"
-    assert "用户在做数据平台" in system_prompt
+    reminder = llm.received[0][-1].content
+    assert "用户在做数据平台" in reminder
 
 
-def test_plan_appears_in_next_system_prompt(runtime_factory):
+def test_plan_appears_in_runtime_reminder(runtime_factory):
     _, llm, session, agent = runtime_factory(
         [
             assistant_tool_call("update_plan", {"steps": ["查资料", "写报告"], "current": 1}),
@@ -149,7 +149,8 @@ def test_plan_appears_in_next_system_prompt(runtime_factory):
     agent.run("先做个计划", stream=False)
 
     assert session.plan.steps == ["查资料", "写报告"]
-    assert "[>] 1. 查资料" in llm.received[1][0].content
+    assert llm.received[0][0].content == llm.received[1][0].content, "static system 应整轮不变"
+    assert "[>] 1. 查资料" in llm.received[1][-1].content
 
 
 def test_subagent_runs_in_isolated_context(runtime_factory):

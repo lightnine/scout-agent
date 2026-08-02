@@ -19,7 +19,14 @@ from ..memory.working import WorkingMemory
 from ..tools import SUBAGENT_TOOLS
 from ..tools.registry import ToolRegistry
 from .events import EventBus, EventType
-from .prompts import FORCE_FINAL, build_system_prompt, build_worker_prompt
+from .prompts import (
+    FORCE_FINAL,
+    build_runtime_reminder,
+    build_static_system_prompt,
+    build_worker_runtime_reminder,
+    build_worker_static_prompt,
+    format_run_timestamp,
+)
 from .session import Session
 
 REPEAT_LIMIT = 3
@@ -67,6 +74,7 @@ class Agent:
     # ------------------------------------------------------------------ 主循环
     def run(self, user_input: str, stream: bool = True) -> AgentResult:
         run_id = uuid.uuid4().hex[:8]
+        run_started_at = format_run_timestamp()
         self._emit(EventType.RUN_START, {"run_id": run_id, "input": user_input})
 
         if self.role == "lead":
@@ -90,12 +98,12 @@ class Agent:
                 self._maybe_compact()
 
                 last_step = step == self.max_steps
-                messages = self._assemble(memories, force_final=last_step)
+                messages = self._assemble(memories, force_final=last_step, run_started_at=run_started_at)
 
                 self._emit(EventType.LLM_START, {"step": step, "messages": len(messages)})
                 response = self.llm.chat(
                     messages,
-                    tools=None if last_step else self.registry.schemas(),
+                    tools=None if last_step else self.registry.cached_schemas(),
                     stream=stream,
                     on_delta=self._on_delta if stream else None,
                     model=self.model,
@@ -109,6 +117,7 @@ class Agent:
                         "tool_calls": [tc.name for tc in response.message.tool_calls],
                         "prompt_tokens": response.usage.prompt_tokens,
                         "completion_tokens": response.usage.completion_tokens,
+                        "cached_tokens": response.usage.cached_tokens,
                         "latency_ms": response.latency_ms,
                     },
                 )
@@ -153,18 +162,38 @@ class Agent:
         return result
 
     # ------------------------------------------------------------------ 各环节
-    def _assemble(self, memories: list, force_final: bool) -> list[Message]:
-        """每一步都重新组装 system prompt：计划、来源清单、配额都要是最新的。"""
+    def _assemble(self, memories: list, force_final: bool, run_started_at: str) -> list[Message]:
+        """组装 cache-friendly 的消息序列。
+
+        静态 system 前缀整轮不变；计划/来源/配额等 volatile 状态放在 messages 末尾的
+        runtime reminder 里，避免每步 invalidate prefix cache。
+        """
+        tool_names = [t.name for t in self.registry.tools]
         if self.role == "worker":
-            system = build_worker_prompt(self.settings)
-        else:
-            system = build_system_prompt(
-                self.session,
-                self.settings,
-                memories,
-                [t.name for t in self.registry.tools],
+            system = build_worker_static_prompt(self.settings)
+            messages = [Message(role="system", content=system), *self.working.messages]
+            messages.append(
+                Message(
+                    role="user",
+                    content=build_worker_runtime_reminder(
+                        self.settings, run_started_at=run_started_at
+                    ),
+                )
             )
-        messages = [Message(role="system", content=system), *self.working.messages]
+        else:
+            system = build_static_system_prompt(self.settings, tool_names)
+            messages = [Message(role="system", content=system), *self.working.messages]
+            messages.append(
+                Message(
+                    role="user",
+                    content=build_runtime_reminder(
+                        self.session,
+                        self.settings,
+                        memories,
+                        run_started_at=run_started_at,
+                    ),
+                )
+            )
         if force_final:
             messages.append(Message(role="user", content=FORCE_FINAL))
         return messages
