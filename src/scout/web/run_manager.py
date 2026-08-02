@@ -130,7 +130,10 @@ class RunManager:
         with record.condition:
             if event.type is EventType.APPROVAL_REQUIRED and record.status == "running":
                 record.status = "awaiting_approval"
-            elif event.type is EventType.APPROVAL_RESOLVED and record.status == "awaiting_approval":
+            elif (
+                event.type is EventType.APPROVAL_RESOLVED
+                and record.status not in ("cancelling", "finished")
+            ):
                 record.status = "running"
             envelope = RunEnvelope(
                 id=record.next_event_id,

@@ -102,6 +102,26 @@ def test_cancel_requests_token_and_notifies_approval_gateway():
     assert manager.cancel(record.run_id) == "already_finished"
 
 
+def test_approval_events_transition_status_unless_cancelling():
+    runtime = FakeRuntime()
+    manager = RunManager(runtime)
+    record = manager.start_run("s1", "question")
+    assert manager.wait_for_events(record.run_id, after_id=0, timeout=1)
+
+    runtime.bus.emit(EventType.APPROVAL_REQUIRED, {"approval_id": "a1"})
+    assert record.status == "awaiting_approval"
+    runtime.bus.emit(EventType.APPROVAL_RESOLVED, {"approval_id": "a1", "action": "approve"})
+    assert record.status == "running"
+
+    manager.cancel(record.run_id)
+    runtime.bus.emit(EventType.APPROVAL_REQUIRED, {"approval_id": "a2"})
+    runtime.bus.emit(EventType.APPROVAL_RESOLVED, {"approval_id": "a2", "action": "cancel"})
+    assert record.status == "cancelling"
+
+    runtime.release.set()
+    wait_for_thread(record)
+
+
 def test_shutdown_cancels_and_joins_the_active_run():
     class CancellableAgent:
         def __init__(self, bus, cancellation):
