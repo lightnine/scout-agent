@@ -7,8 +7,8 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from ..llm.cache import stable_tool_schemas
 from ..llm.base import ToolCall
+from ..llm.cache import stable_tool_schemas
 from .base import Tool, ToolContext, ToolResult
 
 MAX_RESULT_CHARS = 20000
