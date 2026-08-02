@@ -17,6 +17,10 @@ class ActiveRunError(RuntimeError):
     """Raised when a second lead run is started while one is active."""
 
 
+class RunManagerClosedError(ActiveRunError):
+    """Raised when a run is requested after manager shutdown begins."""
+
+
 class RunNotFoundError(KeyError):
     """Raised when a run is no longer retained."""
 
@@ -67,10 +71,13 @@ class RunManager:
         self._lock = threading.RLock()
         self._active: RunRecord | None = None
         self._records: OrderedDict[str, RunRecord] = OrderedDict()
+        self._shutting_down = False
         runtime.bus.subscribe(self.on_event)
 
     def start_run(self, session_id: str, question: str) -> RunRecord:
         with self._lock:
+            if self._shutting_down:
+                raise RunManagerClosedError("运行管理器正在关闭，不能启动新任务")
             if self._active is not None:
                 raise ActiveRunError("已有任务正在运行")
 
@@ -81,14 +88,20 @@ class RunManager:
             )
             self._active = record
             self._records[record.run_id] = record
-            self._evict_old_records()
             record.thread = threading.Thread(
                 target=self._run,
                 args=(record, question),
                 name=f"scout-run-{record.run_id}",
                 daemon=True,
             )
-            record.thread.start()
+            try:
+                record.thread.start()
+            except Exception:
+                if self._active is record:
+                    self._active = None
+                self._records.pop(record.run_id, None)
+                raise
+            self._evict_old_records()
             return record
 
     def _evict_old_records(self) -> None:
@@ -161,6 +174,7 @@ class RunManager:
 
     def shutdown(self) -> None:
         with self._lock:
+            self._shutting_down = True
             active = self._active
         if active is not None:
             self.cancel(active.run_id)
