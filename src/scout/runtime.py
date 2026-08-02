@@ -46,7 +46,11 @@ class Runtime:
             timeout=settings.request_timeout,
         )
         self.memory = SemanticMemory(self.store, self.llm)
-        self.approver = approver or PolicyApprover(settings.permission_mode)
+        self.approver = approver or PolicyApprover(
+            settings.permission_mode,
+            gateway=approval_gateway,
+            emit=lambda kind, data: self.bus.emit(kind, data),
+        )
         self.approval_gateway = approval_gateway or getattr(self.approver, "gateway", None)
         self.trace: TraceRecorder | None = None
         if enable_trace:

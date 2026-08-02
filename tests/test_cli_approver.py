@@ -1,9 +1,9 @@
-"""CLI 审批兼容：ask 模式仍能通过 gateway 放行/拒绝 risky 工具。"""
+"""CLI 审批：ask/readonly 通过 CliApprovalGateway 放行/拒绝 risky 工具。"""
 
 from __future__ import annotations
 
 from scout.approval import ApprovalAction, ApprovalKind, ApprovalRequest
-from scout.cli import make_approver
+from scout.approval_cli import CliApprovalGateway
 from scout.permissions import PolicyApprover
 from scout.tools.base import Risk, tool
 
@@ -26,9 +26,14 @@ class FakeConsole:
         return self.answers.pop(0)
 
 
+def _approver(console: FakeConsole, mode: str) -> PolicyApprover:
+    gateway = None if mode == "auto" else CliApprovalGateway(console)
+    return PolicyApprover(mode, gateway=gateway)
+
+
 def test_cli_approver_uses_gateway_not_prompt_callback():
     console = FakeConsole(["y"])
-    approver = make_approver(console, "ask")
+    approver = _approver(console, "ask")
     assert isinstance(approver, PolicyApprover)
     assert callable(getattr(approver.gateway, "request", None))
 
@@ -38,14 +43,14 @@ def test_cli_approver_uses_gateway_not_prompt_callback():
 
 def test_cli_approver_rejects_on_no():
     console = FakeConsole(["n"])
-    approver = make_approver(console, "ask")
+    approver = _approver(console, "ask")
     decision = approver.check(risky, {"value": "x"}, session_id="s1", run_id="r1")
     assert decision.allowed is False
 
 
 def test_cli_approver_allow_session_skips_second_prompt():
     console = FakeConsole(["a"])
-    approver = make_approver(console, "ask")
+    approver = _approver(console, "ask")
     first = approver.check(risky, {"value": "a"}, session_id="s1", run_id="r1")
     second = approver.check(risky, {"value": "b"}, session_id="s1", run_id="r2")
     assert first.allowed and second.allowed
@@ -53,8 +58,8 @@ def test_cli_approver_allow_session_skips_second_prompt():
 
 
 def test_cli_gateway_can_revise_a_plan():
-    console = FakeConsole(["r", "add sources"])
-    gateway = make_approver(console, "ask").gateway
+    console = FakeConsole(["e", "add sources"])
+    gateway = CliApprovalGateway(console)
     request = ApprovalRequest.create(
         "run-1",
         "session-1",
@@ -79,14 +84,14 @@ def test_cli_gateway_can_confirm_or_cancel_a_plan():
     )
 
     assert (
-        make_approver(FakeConsole(["y"]), "ask").gateway.request(request).action
+        CliApprovalGateway(FakeConsole(["y"])).request(request).action
         is ApprovalAction.APPROVE
     )
     assert (
-        make_approver(FakeConsole(["c"]), "ask").gateway.request(request).action
+        CliApprovalGateway(FakeConsole(["c"])).request(request).action
         is ApprovalAction.CANCEL
     )
 
 
 def test_auto_mode_has_no_cli_plan_gateway():
-    assert make_approver(FakeConsole([]), "auto").gateway is None
+    assert _approver(FakeConsole([]), "auto").gateway is None

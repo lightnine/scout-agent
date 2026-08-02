@@ -302,6 +302,23 @@ def test_worker_preserves_parent_run_id_for_later_risky_tool(settings):
     assert captured[0].run_id == "parent-run"
 
 
+def test_runtime_wires_approval_gateway_to_approver(settings):
+    class CaptureGateway:
+        def request(self, request, emit=None):
+            return ApprovalDecision(ApprovalAction.APPROVE)
+
+    gateway = CaptureGateway()
+    runtime = Runtime(settings, approval_gateway=gateway, enable_trace=False)
+    try:
+        assert runtime.approval_gateway is gateway
+        assert runtime.approver.gateway is gateway
+        session = runtime.new_session()
+        agent = runtime.build_agent(session)
+        assert agent.approval_gateway is gateway
+    finally:
+        runtime.close()
+
+
 def test_worker_start_does_not_clear_parent_cancellation(settings):
     runtime = Runtime(settings, llm=FakeLLM(), enable_trace=False)
     try:
