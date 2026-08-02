@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..approval import ApprovalAction, ApprovalGateway, ApprovalKind, ApprovalRequest
+from ..cancellation import RunCancellation, RunCancelled
 from ..llm.base import LLMClient, Message, ToolCall, Usage
 from ..memory.working import WorkingMemory
 from ..tools import SUBAGENT_TOOLS
@@ -41,6 +43,11 @@ class AgentResult:
     tool_calls: int = 0
 
 
+@dataclass(slots=True)
+class _RunState:
+    plan_confirmed: bool
+
+
 class Agent:
     def __init__(
         self,
@@ -57,6 +64,8 @@ class Agent:
         max_steps: int | None = None,
         model: str | None = None,
         persist: bool = True,
+        approval_gateway: ApprovalGateway | None = None,
+        cancellation: RunCancellation | None = None,
     ) -> None:
         self.llm = llm
         self.settings = settings
@@ -70,11 +79,20 @@ class Agent:
         self.max_steps = max_steps or settings.max_steps
         self.model = model
         self.persist = persist
+        self.approval_gateway = approval_gateway
+        self.cancellation = cancellation or RunCancellation()
 
     # ------------------------------------------------------------------ 主循环
-    def run(self, user_input: str, stream: bool = True) -> AgentResult:
-        run_id = uuid.uuid4().hex[:8]
+    def run(
+        self, user_input: str, stream: bool = True, run_id: str | None = None
+    ) -> AgentResult:
+        run_id = run_id or uuid.uuid4().hex[:8]
+        self.cancellation.clear()
         self.registry.ctx.run_id = run_id
+        self.registry.ctx.cancellation = self.cancellation
+        state = _RunState(
+            plan_confirmed=self.role != "lead" or self.approval_gateway is None
+        )
         run_started_at = format_run_timestamp()
         self._emit(EventType.RUN_START, {"run_id": run_id, "input": user_input})
 
@@ -95,6 +113,7 @@ class Agent:
 
         try:
             for step in range(1, self.max_steps + 1):
+                self.cancellation.ensure_active()
                 self._emit(EventType.STEP_START, {"step": step, "max": self.max_steps})
                 self._maybe_compact()
 
@@ -133,12 +152,16 @@ class Agent:
                     break
 
                 tool_call_count += len(assistant.tool_calls)
-                tool_messages = self._run_tools(assistant.tool_calls, signatures)
+                self.cancellation.ensure_active()
+                tool_messages = self._run_tools(assistant.tool_calls, signatures, run_id, state)
                 self.working.extend(tool_messages)
                 pending.extend(tool_messages)
             else:
                 stop_reason = "max_steps"
                 final_text = "已达到步数上限，未能得出最终结论。"
+        except RunCancelled:
+            stop_reason = "cancelled"
+            final_text = "运行已取消。"
         except Exception as exc:
             stop_reason = "error"
             final_text = f"执行出错：{type(exc).__name__}: {exc}"
@@ -227,7 +250,13 @@ class Agent:
                 },
             )
 
-    def _run_tools(self, calls: list[ToolCall], signatures: list[str]) -> list[Message]:
+    def _run_tools(
+        self,
+        calls: list[ToolCall],
+        signatures: list[str],
+        run_id: str,
+        state: _RunState,
+    ) -> list[Message]:
         blocked: dict[str, str] = {}
         for call in calls:
             signature = f"{call.name}:{sorted(call.arguments.items())}"
@@ -241,21 +270,59 @@ class Agent:
             signatures.append(signature)
 
         runnable = [c for c in calls if c.id not in blocked]
+        plan_calls = (
+            [call for call in runnable if call.name == "update_plan"]
+            if self.role == "lead" and not state.plan_confirmed
+            else []
+        )
+        deferred: dict[str, str] = {}
+        if plan_calls:
+            allowed_ids = {call.id for call in plan_calls}
+            for call in runnable:
+                if call.id not in allowed_ids:
+                    deferred[call.id] = "计划尚未确认，请在确认后重新调用该工具。"
+            runnable = plan_calls
+
+        self.cancellation.ensure_active()
         for call in runnable:
             self._emit(
                 EventType.TOOL_START,
                 {"tool": call.name, "arguments": call.arguments, "id": call.id},
             )
         results = self.registry.execute_batch(runnable) if runnable else []
+        plan_feedback = ""
+        if plan_calls and any(result.ok for result in results):
+            request = ApprovalRequest.create(
+                run_id,
+                self.session.id,
+                ApprovalKind.PLAN,
+                "调研计划待确认",
+                {"plan": self.session.plan.render(), "steps": self.session.plan.steps},
+            )
+            decision = self.approval_gateway.request(
+                request,
+                lambda kind, data: self.bus.emit(kind, data, agent=self.name),
+            )
+            if decision.action is ApprovalAction.APPROVE:
+                state.plan_confirmed = True
+            elif decision.action is ApprovalAction.CANCEL:
+                raise RunCancelled("用户取消运行")
+            else:
+                feedback = decision.feedback or "请重新制定计划"
+                plan_feedback = f"[计划未确认] 用户修改意见：{feedback}\n请重拟计划并再次提交。"
 
         messages: list[Message] = []
         by_id = {call.id: result for call, result in zip(runnable, results, strict=True)}
         for call in calls:
             if call.id in blocked:
                 content, display, ok = blocked[call.id], "被重复调用保护拦截", False
+            elif call.id in deferred:
+                content, display, ok = deferred[call.id], "等待计划确认", False
             else:
                 result = by_id[call.id]
                 content, display, ok = result.content, result.display, result.ok
+                if plan_feedback and call.id in {plan_call.id for plan_call in plan_calls}:
+                    content = f"{content}\n{plan_feedback}"
                 self._emit(
                     EventType.TOOL_END,
                     {
@@ -301,6 +368,8 @@ class Agent:
                 max_steps=self.settings.subagent_max_steps,
                 model=self.settings.worker_model(),
                 persist=False,
+                approval_gateway=self.approval_gateway,
+                cancellation=self.cancellation,
             )
             result = worker.run(brief, stream=False)
             self._emit(

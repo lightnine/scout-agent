@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from scout.approval import ApprovalDecision
 from scout.config import Settings
 from scout.llm.base import LLMResponse, Message, ToolCall, Usage
 from scout.memory.store import Store
@@ -39,6 +40,29 @@ class FakeLLM:
 
     def embed(self, texts):
         return []
+
+
+class ScriptedGateway:
+    def __init__(self, decisions: list[ApprovalDecision]):
+        self.decisions = list(decisions)
+        self.requests = []
+
+    def request(self, request, emit=None):
+        self.requests.append(request)
+        if emit:
+            emit("approval_required", request.event_data())
+        decision = self.decisions.pop(0)
+        if emit:
+            emit(
+                "approval_resolved",
+                {
+                    "approval_id": request.id,
+                    "run_id": request.run_id,
+                    "session_id": request.session_id,
+                    "action": decision.action.value,
+                },
+            )
+        return decision
 
 
 def assistant_tool_call(name: str, arguments: dict, call_id: str = "c1") -> Message:

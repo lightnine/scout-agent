@@ -252,7 +252,7 @@ def test_agent_run_propagates_run_id_to_approval_requests(settings):
     try:
         session = runtime.new_session()
         agent = runtime.build_agent(session)
-        agent.run("写个文件", stream=False)
+        agent.run("写个文件", stream=False, run_id="requested-run-id")
     finally:
         runtime.close()
 
@@ -260,5 +260,6 @@ def test_agent_run_propagates_run_id_to_approval_requests(settings):
     assert len(captured) == 1
     assert captured[0].run_id
     assert captured[0].session_id == session.id
-    assert captured[0].run_id == run_start_ids[0]
-    assert agent.registry.ctx.run_id == run_start_ids[0]
+    assert captured[0].run_id == "requested-run-id"
+    assert run_start_ids[0] == "requested-run-id"
+    assert agent.registry.ctx.run_id == "requested-run-id"

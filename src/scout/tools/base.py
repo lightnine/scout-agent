@@ -67,6 +67,7 @@ class ToolContext:
     spawn: Any = None  # Callable：派生子 Agent，由 Agent 注入
     emit: Any = None  # Callable：向事件总线发事件
     run_id: str = ""
+    cancellation: Any = None  # RunCancellation：当前运行的取消令牌
 
     def resolve(self, path: str) -> Path:
         """把工具传入的路径解析成绝对路径，并禁止逃出工作区。

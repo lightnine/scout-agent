@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .approval import ApprovalGateway
 from .config import Settings
 from .core.agent import Agent
 from .core.events import EventBus
@@ -30,6 +31,7 @@ class Runtime:
         approver: Any = None,
         llm: Any = None,
         enable_trace: bool = True,
+        approval_gateway: ApprovalGateway | None = None,
     ) -> None:
         self.settings = settings
         self.bus = bus or EventBus()
@@ -44,6 +46,7 @@ class Runtime:
         )
         self.memory = SemanticMemory(self.store, self.llm)
         self.approver = approver or PolicyApprover(settings.permission_mode)
+        self.approval_gateway = approval_gateway or getattr(self.approver, "gateway", None)
         self.trace: TraceRecorder | None = None
         if enable_trace:
             self.trace = TraceRecorder(settings.trace_path)
@@ -78,6 +81,7 @@ class Runtime:
             registry=registry,
             bus=self.bus,
             memory=self.memory,
+            approval_gateway=self.approval_gateway,
         )
         # 子 Agent 的派生函数依赖 Agent 自身，因此在 Agent 创建后回填
         ctx.spawn = agent.make_spawner()
