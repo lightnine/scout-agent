@@ -73,6 +73,31 @@ describe('useWorkbench', () => {
     expect(result.current.session?.id).toBe('s2')
   })
 
+  it('reports initial session loading until the list request settles', async () => {
+    const sessions = deferred<SessionSummary[]>()
+    apiMock.sessions.mockReturnValue(sessions.promise)
+    const { result } = renderHook(() => useWorkbench())
+
+    expect(result.current.loadingSessions).toBe(true)
+
+    await act(async () => {
+      sessions.resolve([])
+    })
+    await waitFor(() => expect(result.current.loadingSessions).toBe(false))
+  })
+
+  it('dismisses controller errors and retries the session list', async () => {
+    apiMock.sessions.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce([])
+    const { result } = renderHook(() => useWorkbench())
+
+    await waitFor(() => expect(result.current.error).toBe('offline'))
+    act(() => result.current.dismissError())
+    expect(result.current.error).toBeNull()
+
+    act(() => result.current.reconnect())
+    await waitFor(() => expect(apiMock.sessions).toHaveBeenCalledTimes(2))
+  })
+
   it('transitions to cancelling before the cancel request resolves', async () => {
     apiMock.session.mockResolvedValue(session('s1'))
     apiMock.startRun.mockResolvedValue({ run_id: 'r1', session_id: 's1' })

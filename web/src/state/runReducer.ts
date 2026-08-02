@@ -62,7 +62,10 @@ export function runReducer(state: RunState, event: SSEEnvelope): RunState {
     case 'plan_updated':
       return { ...state, plan: String(event.data.plan ?? '') }
     case 'tool_start':
-      return { ...state, tools: [...state.tools, { ...event.data, status: 'running' }] }
+      return {
+        ...state,
+        tools: [...state.tools, { ...event.data, worker: event.agent, status: 'running' }],
+      }
     case 'tool_end':
       return { ...state, tools: applyToolEnd(state.tools, event.data) }
     case 'approval_required':
@@ -83,6 +86,8 @@ export function runReducer(state: RunState, event: SSEEnvelope): RunState {
         return state
       }
       return { ...state, error: String(event.data.error ?? 'Unknown error') }
+    case 'error_dismissed':
+      return { ...state, error: null }
     case 'run_end':
       return { ...state, status: 'idle', runId: null, approval: null }
     default:

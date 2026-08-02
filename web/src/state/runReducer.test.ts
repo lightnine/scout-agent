@@ -40,6 +40,15 @@ describe('runReducer', () => {
     expect(state.status).toBe('idle')
   })
 
+  it('retains the worker name for tool activity', () => {
+    const started = runReducer(initialRunState, {
+      ...event('tool_start', { id: 't1', tool: 'web_search', arguments: {} }),
+      agent: 'researcher-2',
+    })
+
+    expect(started.tools[0].worker).toBe('researcher-2')
+  })
+
   it('correlates concurrent same-name tools by id', () => {
     let state = runReducer(initialRunState, event('run_start', { input: 'question' }))
     state = runReducer(state, event('tool_start', { id: 'a', tool: 'web_search', arguments: {} }))
@@ -103,5 +112,12 @@ describe('runReducer', () => {
     const idle = { ...initialRunState, status: 'idle' as const }
     const next = runReducer(idle, event('error', { error: 'late failure' }))
     expect(next).toBe(idle)
+  })
+
+  it('dismisses a visible run error', () => {
+    const failed = { ...initialRunState, status: 'running' as const, error: 'stream failed' }
+    const next = runReducer(failed, event('error_dismissed', {}))
+
+    expect(next.error).toBeNull()
   })
 })

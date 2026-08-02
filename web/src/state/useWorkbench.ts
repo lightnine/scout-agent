@@ -27,6 +27,8 @@ export function useWorkbench() {
   const [run, dispatch] = useReducer(runReducer, initialRunState)
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [loadingSessions, setLoadingSessions] = useState(true)
+  const [loadingSession, setLoadingSession] = useState(false)
   const [connectionRevision, setConnectionRevision] = useState(0)
   const sessionRef = useRef<SessionDetail | null>(null)
   const selectedSessionIdRef = useRef<string | null>(null)
@@ -43,6 +45,8 @@ export function useWorkbench() {
 
   const refreshSessions = useCallback(async () => {
     const requestId = ++sessionsRequestRef.current
+    setLoadingSessions(true)
+    setError(null)
     try {
       const next = await api.sessions()
       if (requestId === sessionsRequestRef.current) {
@@ -53,6 +57,10 @@ export function useWorkbench() {
         setError(cause instanceof Error ? cause.message : '无法刷新会话列表')
       }
       throw cause
+    } finally {
+      if (requestId === sessionsRequestRef.current) {
+        setLoadingSessions(false)
+      }
     }
   }, [])
 
@@ -70,6 +78,7 @@ export function useWorkbench() {
       const requestId = ++selectionRequestRef.current
       selectedSessionIdRef.current = id
       setError(null)
+      setLoadingSession(true)
       try {
         const detail = await api.session(id)
         if (requestId !== selectionRequestRef.current || selectedSessionIdRef.current !== id) {
@@ -84,6 +93,10 @@ export function useWorkbench() {
           setError(cause instanceof Error ? cause.message : '无法加载会话')
         }
         throw cause
+      } finally {
+        if (requestId === selectionRequestRef.current) {
+          setLoadingSession(false)
+        }
       }
     },
     [activateRun, applySession],
@@ -291,14 +304,31 @@ export function useWorkbench() {
     const selectedId = selectedSessionIdRef.current ?? sessionRef.current?.id
     if (selectedId) {
       void refreshSession(selectedId).catch(() => undefined)
+      return
     }
-  }, [refreshSession])
+    void refreshSessions().catch(() => undefined)
+  }, [refreshSession, refreshSessions])
+
+  const dismissError = useCallback(() => {
+    setError(null)
+    dispatch({
+      id: -1,
+      type: 'error_dismissed',
+      run_id: activeRunRef.current?.runId ?? '',
+      session_id: activeRunRef.current?.sessionId ?? '',
+      ts: Date.now() / 1000,
+      agent: 'main',
+      data: {},
+    })
+  }, [])
 
   return {
     sessions,
     session,
     run,
     error,
+    loadingSessions,
+    loadingSession,
     refreshSessions,
     refreshSession,
     selectSession,
@@ -307,6 +337,7 @@ export function useWorkbench() {
     decide,
     cancel,
     reconnect,
+    dismissError,
     api,
   }
 }
