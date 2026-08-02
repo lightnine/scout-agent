@@ -77,6 +77,57 @@ def test_revise_feedback_requires_a_second_plan_confirmation(settings):
     )
 
 
+def test_revise_defers_non_plan_tools_until_replacement_plan_is_approved(settings):
+    gateway = ScriptedGateway(
+        [
+            ApprovalDecision(ApprovalAction.REVISE, "add source validation"),
+            ApprovalDecision(ApprovalAction.APPROVE),
+        ]
+    )
+    llm = FakeLLM(
+        [
+            Message(
+                role="assistant",
+                tool_calls=[
+                    ToolCall("p1", "update_plan", {"steps": ["inspect"], "current": 1})
+                ],
+            ),
+            Message(
+                role="assistant",
+                tool_calls=[ToolCall("f1", "list_dir", {"path": "."})],
+            ),
+            Message(
+                role="assistant",
+                tool_calls=[
+                    ToolCall(
+                        "p2",
+                        "update_plan",
+                        {"steps": ["inspect", "validate"], "current": 1},
+                    )
+                ],
+            ),
+            Message(role="assistant", content="done"),
+        ]
+    )
+    runtime = Runtime(settings, llm=llm, approval_gateway=gateway, enable_trace=False)
+    started_tools: list[str] = []
+    runtime.bus.subscribe(
+        lambda event: started_tools.append(event.data["tool"])
+        if event.type is EventType.TOOL_START
+        else None
+    )
+    session = runtime.new_session()
+    try:
+        runtime.build_agent(session).run("research", stream=False)
+    finally:
+        runtime.close()
+
+    assert started_tools == ["update_plan", "update_plan"]
+    deferred = next(m for m in llm.received[2] if m.tool_call_id == "f1")
+    assert "计划尚未确认" in deferred.content
+    assert len(gateway.requests) == 2
+
+
 def test_approved_plan_updates_do_not_repeat_confirmation(settings):
     gateway = ScriptedGateway([ApprovalDecision(ApprovalAction.APPROVE)])
     llm = FakeLLM(

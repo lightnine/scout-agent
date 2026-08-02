@@ -46,6 +46,7 @@ class AgentResult:
 @dataclass(slots=True)
 class _RunState:
     plan_confirmed: bool
+    plan_submitted: bool = False
 
 
 class Agent:
@@ -84,10 +85,18 @@ class Agent:
 
     # ------------------------------------------------------------------ 主循环
     def run(
-        self, user_input: str, stream: bool = True, run_id: str | None = None
+        self,
+        user_input: str,
+        stream: bool = True,
+        run_id: str | None = None,
+        *,
+        reset_cancellation: bool | None = None,
     ) -> AgentResult:
         run_id = run_id or uuid.uuid4().hex[:8]
-        self.cancellation.clear()
+        if reset_cancellation is None:
+            reset_cancellation = self.role != "worker"
+        if reset_cancellation:
+            self.cancellation.clear()
         self.registry.ctx.run_id = run_id
         self.registry.ctx.cancellation = self.cancellation
         state = _RunState(
@@ -270,9 +279,14 @@ class Agent:
             signatures.append(signature)
 
         runnable = [c for c in calls if c.id not in blocked]
+        requires_plan_confirmation = (
+            self.role == "lead"
+            and self.approval_gateway is not None
+            and not state.plan_confirmed
+        )
         plan_calls = (
             [call for call in runnable if call.name == "update_plan"]
-            if self.role == "lead" and not state.plan_confirmed
+            if requires_plan_confirmation
             else []
         )
         deferred: dict[str, str] = {}
@@ -282,6 +296,11 @@ class Agent:
                 if call.id not in allowed_ids:
                     deferred[call.id] = "计划尚未确认，请在确认后重新调用该工具。"
             runnable = plan_calls
+        elif state.plan_submitted and requires_plan_confirmation:
+            deferred = {
+                call.id: "计划尚未确认，请提交修改后的计划并等待确认。" for call in runnable
+            }
+            runnable = []
 
         self.cancellation.ensure_active()
         for call in runnable:
@@ -292,6 +311,7 @@ class Agent:
         results = self.registry.execute_batch(runnable) if runnable else []
         plan_feedback = ""
         if plan_calls and any(result.ok for result in results):
+            state.plan_submitted = True
             request = ApprovalRequest.create(
                 run_id,
                 self.session.id,
@@ -371,7 +391,12 @@ class Agent:
                 approval_gateway=self.approval_gateway,
                 cancellation=self.cancellation,
             )
-            result = worker.run(brief, stream=False)
+            result = worker.run(
+                brief,
+                stream=False,
+                run_id=self.registry.ctx.run_id,
+                reset_cancellation=False,
+            )
             self._emit(
                 EventType.SUBAGENT_END,
                 {"worker": name, "steps": result.steps, "tokens": result.usage.total},

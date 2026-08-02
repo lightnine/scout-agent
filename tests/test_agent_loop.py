@@ -9,10 +9,14 @@ import pytest
 from conftest import FakeLLM, assistant_tool_call
 
 from scout.approval import ApprovalAction, ApprovalDecision
+from scout.cancellation import RunCancellation
+from scout.core.agent import Agent
 from scout.core.events import EventType
 from scout.llm.base import Message
+from scout.memory.working import WorkingMemory
 from scout.permissions import PolicyApprover
 from scout.runtime import Runtime
+from scout.tools import SUBAGENT_TOOLS
 
 
 @pytest.fixture
@@ -263,3 +267,66 @@ def test_agent_run_propagates_run_id_to_approval_requests(settings):
     assert captured[0].run_id == "requested-run-id"
     assert run_start_ids[0] == "requested-run-id"
     assert agent.registry.ctx.run_id == "requested-run-id"
+
+
+def test_worker_preserves_parent_run_id_for_later_risky_tool(settings):
+    captured: list = []
+
+    class CaptureGateway:
+        def request(self, request, emit=None):
+            captured.append(request)
+            return ApprovalDecision(ApprovalAction.APPROVE)
+
+    settings.permission_mode = "ask"
+    llm = FakeLLM(
+        [
+            assistant_tool_call("research_subtopic", {"topic": "delegated research"}, "sub"),
+            Message(role="assistant", content="worker result"),
+            assistant_tool_call("write_file", {"path": "out.txt", "content": "hi"}, "write"),
+            Message(role="assistant", content="done"),
+        ]
+    )
+    runtime = Runtime(
+        settings,
+        llm=llm,
+        approver=PolicyApprover("ask", gateway=CaptureGateway()),
+        enable_trace=False,
+    )
+    try:
+        session = runtime.new_session()
+        runtime.build_agent(session).run("research", stream=False, run_id="parent-run")
+    finally:
+        runtime.close()
+
+    assert len(captured) == 1
+    assert captured[0].run_id == "parent-run"
+
+
+def test_worker_start_does_not_clear_parent_cancellation(settings):
+    runtime = Runtime(settings, llm=FakeLLM(), enable_trace=False)
+    try:
+        session = runtime.new_session()
+        parent = runtime.build_agent(session)
+        cancellation = RunCancellation()
+        cancellation.request()
+        parent.registry.ctx.run_id = "parent-run"
+        worker = Agent(
+            llm=parent.llm,
+            settings=settings,
+            session=session,
+            registry=parent.registry.subset(SUBAGENT_TOOLS),
+            bus=runtime.bus,
+            name="worker-0",
+            role="worker",
+            working=WorkingMemory(threshold=settings.compact_threshold),
+            persist=False,
+            cancellation=cancellation,
+        )
+
+        result = worker.run("delegated research", stream=False, run_id="parent-run")
+    finally:
+        runtime.close()
+
+    assert result.stop_reason == "cancelled"
+    assert cancellation.is_cancelled() is True
+    assert parent.registry.ctx.run_id == "parent-run"

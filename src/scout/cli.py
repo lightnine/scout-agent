@@ -16,7 +16,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
-from .approval import ApprovalAction, ApprovalDecision
+from .approval import ApprovalAction, ApprovalDecision, ApprovalKind
 from .config import load_settings
 from .core.events import Event, EventBus, EventType
 from .permissions import PolicyApprover
@@ -120,6 +120,27 @@ class Renderer:
 def make_approver(console: Console, mode: str) -> PolicyApprover:
     class _CliGateway:
         def request(self, request, emit=None):
+            if request.kind is ApprovalKind.PLAN:
+                console.print()
+                console.print(
+                    Panel(
+                        _escape(request.payload["plan"]),
+                        title="调研计划待确认",
+                        border_style="yellow",
+                    )
+                )
+                answer = console.input(
+                    "[yellow]确认计划吗？(y=确认 / r=修改 / c=取消) [/yellow]"
+                ).strip().lower()
+                if answer == "r":
+                    feedback = console.input("[yellow]请输入修改意见：[/yellow]").strip()
+                    return ApprovalDecision(ApprovalAction.REVISE, feedback)
+                if answer in ("c", "cancel"):
+                    return ApprovalDecision(ApprovalAction.CANCEL)
+                if answer in ("y", "yes", ""):
+                    return ApprovalDecision(ApprovalAction.APPROVE)
+                return ApprovalDecision(ApprovalAction.REVISE)
+
             tool = Tool(
                 name=request.payload["tool"],
                 description="",
@@ -146,7 +167,7 @@ def make_approver(console: Console, mode: str) -> PolicyApprover:
                 return ApprovalDecision(ApprovalAction.APPROVE)
             return ApprovalDecision(ApprovalAction.REJECT)
 
-    return PolicyApprover(mode, gateway=_CliGateway())
+    return PolicyApprover(mode, gateway=_CliGateway() if mode == "ask" else None)
 
 
 def main(argv: list[str] | None = None) -> int:

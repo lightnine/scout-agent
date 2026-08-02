@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from scout.approval import ApprovalAction, ApprovalKind, ApprovalRequest
 from scout.cli import make_approver
 from scout.permissions import PolicyApprover
 from scout.tools.base import Risk, tool
@@ -49,3 +50,43 @@ def test_cli_approver_allow_session_skips_second_prompt():
     second = approver.check(risky, {"value": "b"}, session_id="s1", run_id="r2")
     assert first.allowed and second.allowed
     assert len(console.answers) == 0
+
+
+def test_cli_gateway_can_revise_a_plan():
+    console = FakeConsole(["r", "add sources"])
+    gateway = make_approver(console, "ask").gateway
+    request = ApprovalRequest.create(
+        "run-1",
+        "session-1",
+        ApprovalKind.PLAN,
+        "调研计划待确认",
+        {"plan": "1. inspect", "steps": ["inspect"]},
+    )
+
+    decision = gateway.request(request)
+
+    assert decision.action is ApprovalAction.REVISE
+    assert decision.feedback == "add sources"
+
+
+def test_cli_gateway_can_confirm_or_cancel_a_plan():
+    request = ApprovalRequest.create(
+        "run-1",
+        "session-1",
+        ApprovalKind.PLAN,
+        "调研计划待确认",
+        {"plan": "1. inspect", "steps": ["inspect"]},
+    )
+
+    assert (
+        make_approver(FakeConsole(["y"]), "ask").gateway.request(request).action
+        is ApprovalAction.APPROVE
+    )
+    assert (
+        make_approver(FakeConsole(["c"]), "ask").gateway.request(request).action
+        is ApprovalAction.CANCEL
+    )
+
+
+def test_auto_mode_has_no_cli_plan_gateway():
+    assert make_approver(FakeConsole([]), "auto").gateway is None
