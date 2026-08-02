@@ -1,4 +1,4 @@
-export function PlanPanel({ plan }: { plan: string }) {
+export function PlanPanel({ plan, loading = false }: { plan: string; loading?: boolean }) {
   return (
     <section className="panel plan-panel" aria-labelledby="plan-title">
       <div className="section-heading">
@@ -7,7 +7,12 @@ export function PlanPanel({ plan }: { plan: string }) {
           <h2 id="plan-title">研究计划</h2>
         </div>
       </div>
-      {plan ? (
+      {loading ? (
+        <div className="compact-state" role="status">
+          <span className="spinner" aria-hidden="true" />
+          正在载入计划…
+        </div>
+      ) : plan ? (
         <pre className="plan">{plan}</pre>
       ) : (
         <div className="compact-state empty">

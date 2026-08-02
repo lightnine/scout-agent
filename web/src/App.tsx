@@ -14,6 +14,7 @@ export default function App() {
   const workbench = useWorkbench()
   const error = workbench.error ?? workbench.run.error
   const currentPlan = workbench.run.plan || workbench.session?.plan || ''
+  const navigationDisabled = workbench.run.status !== 'idle' || workbench.loadingSession
 
   return (
     <main className="app-shell">
@@ -35,15 +36,16 @@ export default function App() {
         <aside className="left-column" aria-label="会话与计划">
           <SessionList
             sessions={workbench.sessions}
-            selectedId={workbench.session?.id ?? null}
+            selectedId={workbench.selectedSessionId}
             loading={workbench.loadingSessions}
-            disabled={false}
+            loaded={workbench.sessionsLoaded}
+            disabled={navigationDisabled}
             onSelect={workbench.selectSession}
             onNew={async () => {
               await workbench.createSession()
             }}
           />
-          <PlanPanel plan={currentPlan} />
+          <PlanPanel plan={currentPlan} loading={workbench.loadingSession} />
         </aside>
 
         <div className="center-column" aria-busy={workbench.loadingSession}>
@@ -57,14 +59,21 @@ export default function App() {
             messages={workbench.session?.messages ?? []}
             streamingText={workbench.run.streamingText}
             status={workbench.run.status}
+            loading={workbench.loadingSession}
             onSubmit={workbench.start}
           />
         </div>
 
         <aside className="right-column" aria-label="活动与来源">
           <EventPanel tools={workbench.run.tools} status={workbench.run.status} />
-          <SourcesPanel sources={workbench.session?.sources ?? []} />
-          <MetricsPanel usage={workbench.session?.usage ?? {}} />
+          <SourcesPanel
+            sources={workbench.session?.sources ?? []}
+            loading={workbench.loadingSession}
+          />
+          <MetricsPanel
+            usage={workbench.session?.usage ?? null}
+            loading={workbench.loadingSession}
+          />
         </aside>
       </div>
 

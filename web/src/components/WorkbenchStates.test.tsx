@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ErrorBanner } from './ErrorBanner'
 import { EventPanel } from './EventPanel'
+import { MetricsPanel } from './MetricsPanel'
 import { PlanPanel } from './PlanPanel'
 import { SessionList } from './SessionList'
 import { SourcesPanel } from './SourcesPanel'
@@ -16,6 +17,7 @@ describe('workbench empty and error states', () => {
         sessions={[]}
         selectedId={null}
         loading
+        loaded={false}
         disabled={false}
         onSelect={vi.fn()}
         onNew={vi.fn()}
@@ -28,12 +30,53 @@ describe('workbench empty and error states', () => {
         sessions={[]}
         selectedId={null}
         loading={false}
+        loaded
         disabled={false}
         onSelect={vi.fn()}
         onNew={vi.fn()}
       />,
     )
     expect(screen.getByText('还没有研究会话')).toBeInTheDocument()
+  })
+
+  it('does not describe a failed initial session load as empty', () => {
+    render(
+      <SessionList
+        sessions={[]}
+        selectedId={null}
+        loading={false}
+        loaded={false}
+        disabled={false}
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('无法载入会话')).toBeInTheDocument()
+    expect(screen.queryByText('还没有研究会话')).toBeNull()
+  })
+
+  it('disables new and select session controls during an active run', () => {
+    render(
+      <SessionList
+        sessions={[{
+          id: 's1',
+          title: '运行中的会话',
+          message_count: 2,
+          created_at: 1,
+          updated_at: 1,
+        }]}
+        selectedId="s1"
+        loading={false}
+        loaded
+        disabled
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: '新建会话' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /运行中的会话/ })).toBeDisabled()
   })
 
   it('shows empty plan, activity, and source guidance', () => {
@@ -62,6 +105,36 @@ describe('workbench empty and error states', () => {
 
     expect(onRetry).toHaveBeenCalledOnce()
     expect(onDismiss).toHaveBeenCalledOnce()
+  })
+
+  it('shows detail loading without stale plan, sources, or metrics', () => {
+    render(
+      <>
+        <PlanPanel plan="旧计划" loading />
+        <SourcesPanel
+          sources={[{ label: 'A', title: '旧来源', url: 'https://example.com', fetched_at: 0 }]}
+          loading
+        />
+        <MetricsPanel usage={{ calls: 9 }} loading />
+      </>,
+    )
+
+    expect(screen.getByText('正在载入计划…')).toBeInTheDocument()
+    expect(screen.getByText('正在载入来源…')).toBeInTheDocument()
+    expect(screen.getByText('正在载入用量…')).toBeInTheDocument()
+    expect(screen.queryByText('旧计划')).toBeNull()
+    expect(screen.queryByText('旧来源')).toBeNull()
+    expect(screen.queryByText('9')).toBeNull()
+  })
+
+  it('distinguishes no selected session from a loaded zero-usage session', () => {
+    const { rerender } = render(<MetricsPanel usage={null} loading={false} />)
+    expect(screen.getByText('选择会话后查看用量。')).toBeInTheDocument()
+
+    rerender(<MetricsPanel usage={{}} loading={false} />)
+    expect(screen.queryByText('选择会话后查看用量。')).toBeNull()
+    expect(screen.getByText('模型调用')).toBeInTheDocument()
+    expect(screen.getAllByText('0', { exact: true })).toHaveLength(4)
   })
 
   it('omits unsafe source URLs', () => {

@@ -15,8 +15,8 @@
   --slate-100: #f1f5f9;
   --slate-200: #e2e8f0;
   --slate-300: #cbd5e1;
-  --slate-400: #94a3b8;
-  --slate-500: #64748b;
+  --slate-400: #64748b;
+  --slate-500: #526174;
   --slate-600: #475569;
   --slate-700: #334155;
   --red: #b42318;
@@ -386,6 +386,10 @@ a:focus-visible {
   background: var(--indigo);
 }
 
+.session-list button:disabled {
+  opacity: 0.62;
+}
+
 .session-title {
   overflow: hidden;
   font-size: 12px;
@@ -708,6 +712,10 @@ a:focus-visible {
   border: 1px dashed var(--slate-300);
   border-radius: 14px;
   background: rgb(248 250 252 / 78%);
+}
+
+.chat-detail-loading {
+  min-height: 100%;
 }
 
 .chat-empty svg {
@@ -1420,10 +1428,6 @@ kbd {
 
   .error-banner span {
     white-space: normal;
-  }
-
-  .error-actions > button:not(.icon-button) {
-    display: none;
   }
 
   .approval-modal {

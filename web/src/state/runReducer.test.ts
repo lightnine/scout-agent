@@ -108,6 +108,47 @@ describe('runReducer', () => {
     expect(next.runId).toBe('r1')
   })
 
+  it('restores running state when cancellation fails', () => {
+    const running = runReducer(initialRunState, event('run_start', { input: 'question' }))
+    const cancelling = runReducer(running, event('cancel_requested', {}))
+    const recovered = runReducer(cancelling, event('cancel_failed', { error: 'cancel offline' }))
+
+    expect(recovered.status).toBe('running')
+    expect(recovered.runId).toBe('r1')
+    expect(recovered.error).toBe('cancel offline')
+  })
+
+  it('restores a pending approval when cancellation fails', () => {
+    let state = runReducer(initialRunState, event('run_start', { input: 'question' }))
+    state = runReducer(
+      state,
+      event('approval_required', {
+        approval_id: 'a1',
+        kind: 'tool',
+        title: 'Approve tool',
+        payload: { tool: 'write_file' },
+      }),
+    )
+    state = runReducer(state, event('cancel_requested', {}))
+    expect(state.status).toBe('cancelling')
+    expect(state.approval).toBeNull()
+
+    state = runReducer(state, event('cancel_failed', { error: 'cancel offline' }))
+    expect(state.status).toBe('awaiting_approval')
+    expect(state.approval?.approval_id).toBe('a1')
+  })
+
+  it('clears completed run transients when the visible session changes', () => {
+    let state = runReducer(initialRunState, event('run_start', { input: 'question' }))
+    state = runReducer(state, event('llm_delta', { text: 'answer A' }))
+    state = runReducer(state, event('plan_updated', { plan: 'plan A' }))
+    state = runReducer(state, event('tool_start', { id: 't1', tool: 'search' }))
+    state = runReducer(state, event('run_end', {}))
+
+    const changed = runReducer(state, event('session_changed', {}))
+    expect(changed).toEqual(initialRunState)
+  })
+
   it('ignores error events when already idle', () => {
     const idle = { ...initialRunState, status: 'idle' as const }
     const next = runReducer(idle, event('error', { error: 'late failure' }))

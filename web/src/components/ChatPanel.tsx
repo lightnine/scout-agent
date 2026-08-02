@@ -16,11 +16,13 @@ export function ChatPanel({
   messages,
   streamingText,
   status,
+  loading = false,
   onSubmit,
 }: {
   messages: Message[]
   streamingText: string
   status: RunState['status']
+  loading?: boolean
   onSubmit: (question: string) => Promise<void>
 }) {
   const [question, setQuestion] = useState('')
@@ -33,7 +35,7 @@ export function ChatPanel({
   const showStream =
     Boolean(streamingText) &&
     !(lastMessage?.role === 'assistant' && lastMessage.content.trim() === streamingText.trim())
-  const disabled = status !== 'idle' || submitting
+  const disabled = loading || status !== 'idle' || submitting
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -53,6 +55,9 @@ export function ChatPanel({
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.nativeEvent.isComposing) {
+      return
+    }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       event.currentTarget.form?.requestSubmit()
@@ -75,41 +80,50 @@ export function ChatPanel({
       </header>
 
       <div className="messages" aria-live="polite">
-        {empty && (
-          <div className="empty-state chat-empty">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H11l-4.8 4v-4A2.5 2.5 0 0 1 4 13.5Z" />
-              <path d="M8 8h8M8 11.5h5" />
-            </svg>
-            <strong>从一个研究问题开始</strong>
-            <p>描述目标、范围和期望的输出，Scout 会规划步骤并整理可追溯的来源。</p>
+        {loading ? (
+          <div className="compact-state chat-detail-loading" role="status">
+            <span className="spinner" aria-hidden="true" />
+            正在载入对话…
           </div>
-        )}
+        ) : (
+          <>
+            {empty && (
+              <div className="empty-state chat-empty">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H11l-4.8 4v-4A2.5 2.5 0 0 1 4 13.5Z" />
+                  <path d="M8 8h8M8 11.5h5" />
+                </svg>
+                <strong>从一个研究问题开始</strong>
+                <p>描述目标、范围和期望的输出，Scout 会规划步骤并整理可追溯的来源。</p>
+              </div>
+            )}
 
-        {visibleMessages.map((message, index) => (
-          <article
-            className={`message ${message.role}`}
-            key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
-          >
-            <div className="message-meta">
-              <span>{message.role === 'user' ? '你' : 'Scout'}</span>
-            </div>
-            <div className="markdown">
-              <ReactMarkdown>{message.content}</ReactMarkdown>
-            </div>
-          </article>
-        ))}
+            {visibleMessages.map((message, index) => (
+              <article
+                className={`message ${message.role}`}
+                key={`${message.role}-${index}-${message.content.slice(0, 24)}`}
+              >
+                <div className="message-meta">
+                  <span>{message.role === 'user' ? '你' : 'Scout'}</span>
+                </div>
+                <div className="markdown">
+                  <ReactMarkdown>{message.content}</ReactMarkdown>
+                </div>
+              </article>
+            ))}
 
-        {showStream && (
-          <article className="message assistant streaming">
-            <div className="message-meta">
-              <span>Scout</span>
-              <span className="stream-label"><i />正在生成</span>
-            </div>
-            <div className="markdown">
-              <ReactMarkdown>{streamingText}</ReactMarkdown>
-            </div>
-          </article>
+            {showStream && (
+              <article className="message assistant streaming">
+                <div className="message-meta">
+                  <span>Scout</span>
+                  <span className="stream-label"><i />正在生成</span>
+                </div>
+                <div className="markdown">
+                  <ReactMarkdown>{streamingText}</ReactMarkdown>
+                </div>
+              </article>
+            )}
+          </>
         )}
       </div>
 
@@ -127,7 +141,7 @@ export function ChatPanel({
         <div className="composer-footer">
           <span><kbd>Enter</kbd> 提交 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span>
           <button className="button primary submit-button" disabled={disabled || !question.trim()}>
-            <span>{submitting ? '正在提交' : statusCopy[status]}</span>
+            <span>{loading ? '正在载入' : submitting ? '正在提交' : statusCopy[status]}</span>
             <svg viewBox="0 0 20 20" aria-hidden="true">
               <path d="m4 10 11-6-3.2 12-2.1-4.1L4 10Z" />
             </svg>

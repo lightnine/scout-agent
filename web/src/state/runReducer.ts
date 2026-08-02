@@ -15,6 +15,10 @@ export interface RunState {
   tools: Array<Record<string, unknown>>
   approval: ApprovalView | null
   error: string | null
+  cancellation: {
+    status: 'running' | 'awaiting_approval'
+    approval: ApprovalView | null
+  } | null
 }
 
 export const initialRunState: RunState = {
@@ -25,6 +29,7 @@ export const initialRunState: RunState = {
   tools: [],
   approval: null,
   error: null,
+  cancellation: null,
 }
 
 function applyToolEnd(
@@ -76,11 +81,30 @@ export function runReducer(state: RunState, event: SSEEnvelope): RunState {
       }
     case 'approval_resolved':
       if (state.status === 'cancelling') {
-        return state.approval ? { ...state, approval: null } : state
+        return state.cancellation
+          ? { ...state, cancellation: { status: 'running', approval: null } }
+          : state
       }
       return { ...state, status: 'running', approval: null }
     case 'cancel_requested':
-      return state.runId ? { ...state, status: 'cancelling', approval: null } : state
+      return state.runId && (state.status === 'running' || state.status === 'awaiting_approval')
+        ? {
+            ...state,
+            status: 'cancelling',
+            approval: null,
+            cancellation: { status: state.status, approval: state.approval },
+          }
+        : state
+    case 'cancel_failed':
+      return state.status === 'cancelling' && state.cancellation
+        ? {
+            ...state,
+            status: state.cancellation.status,
+            approval: state.cancellation.approval,
+            error: String(event.data.error ?? '无法取消运行'),
+            cancellation: null,
+          }
+        : state
     case 'error':
       if (state.status === 'idle') {
         return state
@@ -89,7 +113,9 @@ export function runReducer(state: RunState, event: SSEEnvelope): RunState {
     case 'error_dismissed':
       return { ...state, error: null }
     case 'run_end':
-      return { ...state, status: 'idle', runId: null, approval: null }
+      return { ...state, status: 'idle', runId: null, approval: null, cancellation: null }
+    case 'session_changed':
+      return initialRunState
     default:
       return state
   }

@@ -91,11 +91,36 @@ describe('useWorkbench', () => {
     const { result } = renderHook(() => useWorkbench())
 
     await waitFor(() => expect(result.current.error).toBe('offline'))
+    expect(result.current.sessionsLoaded).toBe(false)
     act(() => result.current.dismissError())
     expect(result.current.error).toBeNull()
 
     act(() => result.current.reconnect())
     await waitFor(() => expect(apiMock.sessions).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.sessionsLoaded).toBe(true))
+  })
+
+  it('cannot submit against a stale session while a new selection is pending', async () => {
+    const pendingB = deferred<SessionDetail>()
+    apiMock.session.mockImplementation((id: string) =>
+      id === 'b' ? pendingB.promise : Promise.resolve(session(id)),
+    )
+    apiMock.startRun.mockResolvedValue({ run_id: 'r1', session_id: 'a' })
+    const { result } = renderHook(() => useWorkbench())
+
+    await act(async () => {
+      await result.current.selectSession('a')
+    })
+    act(() => {
+      void result.current.selectSession('b')
+    })
+
+    expect(result.current.loadingSession).toBe(true)
+    expect(result.current.session).toBeNull()
+    await act(async () => {
+      await expect(result.current.start('must target b')).rejects.toThrow('会话仍在加载')
+    })
+    expect(apiMock.startRun).not.toHaveBeenCalled()
   })
 
   it('transitions to cancelling before the cancel request resolves', async () => {
@@ -115,6 +140,24 @@ describe('useWorkbench', () => {
     })
 
     expect(result.current.run.status).toBe('cancelling')
+  })
+
+  it('recovers the active run when the cancel request fails', async () => {
+    apiMock.session.mockResolvedValue(session('s1'))
+    apiMock.startRun.mockResolvedValue({ run_id: 'r1', session_id: 's1' })
+    apiMock.cancel.mockRejectedValue(new Error('cancel offline'))
+    const { result } = renderHook(() => useWorkbench())
+
+    await act(async () => {
+      await result.current.selectSession('s1')
+      await result.current.start('question')
+    })
+    await act(async () => {
+      await expect(result.current.cancel()).rejects.toThrow('cancel offline')
+    })
+
+    expect(result.current.run.status).toBe('running')
+    expect(result.current.run.error).toBe('cancel offline')
   })
 
   it('reconnects the active run without changing the selected session', async () => {
@@ -196,12 +239,9 @@ describe('useWorkbench', () => {
     expect(result.current.session?.id).toBe('existing')
   })
 
-  it('does not invalidate a pending selection when an unrelated run completes', async () => {
-    const target = deferred<SessionDetail>()
+  it('ignores session selection while a run is active', async () => {
     const listeners = new Map<string, (event: SSEEnvelope) => void>()
-    apiMock.session.mockImplementation((id: string) =>
-      id === 'target-a' ? target.promise : Promise.resolve(session(id)),
-    )
+    apiMock.session.mockImplementation((id: string) => Promise.resolve(session(id)))
     apiMock.startRun.mockResolvedValue({ run_id: 'r-origin-b', session_id: 'origin-b' })
     subscribeMock.mockImplementation(
       (runId: string, onEvent: (event: SSEEnvelope) => void) => {
@@ -220,7 +260,8 @@ describe('useWorkbench', () => {
     act(() => {
       void result.current.selectSession('target-a')
     })
-    await waitFor(() => expect(apiMock.session).toHaveBeenCalledWith('target-a'))
+    expect(apiMock.session).not.toHaveBeenCalledWith('target-a')
+    expect(result.current.session?.id).toBe('origin-b')
 
     act(() => {
       listeners.get('r-origin-b')?.({
@@ -234,10 +275,82 @@ describe('useWorkbench', () => {
       })
     })
 
+    await waitFor(() => expect(result.current.run.status).toBe('idle'))
+    expect(result.current.session?.id).toBe('origin-b')
+  })
+
+  it('clears run transients before rendering a different completed session', async () => {
+    const pendingB = deferred<SessionDetail>()
+    let onRunEvent: ((event: SSEEnvelope) => void) | undefined
+    apiMock.session.mockImplementation((id: string) =>
+      id === 'b' ? pendingB.promise : Promise.resolve(session(id)),
+    )
+    apiMock.startRun.mockResolvedValue({ run_id: 'r-a', session_id: 'a' })
+    subscribeMock.mockImplementation(
+      (_runId: string, onEvent: (event: SSEEnvelope) => void) => {
+        onRunEvent = onEvent
+        return vi.fn()
+      },
+    )
+    const { result } = renderHook(() => useWorkbench())
+
     await act(async () => {
-      target.resolve(session('target-a'))
+      await result.current.selectSession('a')
+      await result.current.start('question')
+    })
+    await waitFor(() => expect(onRunEvent).toBeDefined())
+    act(() => {
+      onRunEvent?.({
+        id: 1,
+        type: 'llm_delta',
+        run_id: 'r-a',
+        session_id: 'a',
+        ts: 1,
+        agent: 'main',
+        data: { text: 'answer A' },
+      })
+      onRunEvent?.({
+        id: 2,
+        type: 'plan_updated',
+        run_id: 'r-a',
+        session_id: 'a',
+        ts: 2,
+        agent: 'main',
+        data: { plan: 'plan A' },
+      })
+      onRunEvent?.({
+        id: 3,
+        type: 'tool_start',
+        run_id: 'r-a',
+        session_id: 'a',
+        ts: 3,
+        agent: 'worker-a',
+        data: { id: 't1', tool: 'search' },
+      })
+      onRunEvent?.({
+        id: 4,
+        type: 'run_end',
+        run_id: 'r-a',
+        session_id: 'a',
+        ts: 4,
+        agent: 'main',
+        data: {},
+      })
+    })
+    await waitFor(() => expect(result.current.run.status).toBe('idle'))
+    expect(result.current.run.streamingText).toBe('answer A')
+
+    act(() => {
+      void result.current.selectSession('b')
     })
 
-    await waitFor(() => expect(result.current.session?.id).toBe('target-a'))
+    expect(result.current.session).toBeNull()
+    expect(result.current.run.streamingText).toBe('')
+    expect(result.current.run.plan).toBe('')
+    expect(result.current.run.tools).toEqual([])
+    await act(async () => {
+      pendingB.resolve(session('b'))
+    })
+    await waitFor(() => expect(result.current.session?.id).toBe('b'))
   })
 })

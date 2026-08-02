@@ -29,11 +29,14 @@ export function useWorkbench() {
   const [error, setError] = useState<string | null>(null)
   const [loadingSessions, setLoadingSessions] = useState(true)
   const [loadingSession, setLoadingSession] = useState(false)
+  const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [connectionRevision, setConnectionRevision] = useState(0)
   const sessionRef = useRef<SessionDetail | null>(null)
   const selectedSessionIdRef = useRef<string | null>(null)
   const selectionRequestRef = useRef(0)
   const sessionsRequestRef = useRef(0)
+  const selectionPendingRef = useRef(false)
   const activeRunRef = useRef<ActiveRun | null>(null)
   const subscribedRunIdRef = useRef<string | null>(null)
   const previousStatusRef = useRef(run.status)
@@ -51,6 +54,7 @@ export function useWorkbench() {
       const next = await api.sessions()
       if (requestId === sessionsRequestRef.current) {
         setSessions(next)
+        setSessionsLoaded(true)
       }
     } catch (cause) {
       if (requestId === sessionsRequestRef.current) {
@@ -75,10 +79,25 @@ export function useWorkbench() {
 
   const selectSession = useCallback(
     async (id: string) => {
+      if (run.status !== 'idle') {
+        return
+      }
       const requestId = ++selectionRequestRef.current
       selectedSessionIdRef.current = id
+      setSelectedSessionId(id)
       setError(null)
       setLoadingSession(true)
+      selectionPendingRef.current = true
+      applySession(null)
+      dispatch({
+        id: -1,
+        type: 'session_changed',
+        run_id: '',
+        session_id: id,
+        ts: Date.now() / 1000,
+        agent: 'main',
+        data: {},
+      })
       try {
         const detail = await api.session(id)
         if (requestId !== selectionRequestRef.current || selectedSessionIdRef.current !== id) {
@@ -95,11 +114,12 @@ export function useWorkbench() {
         throw cause
       } finally {
         if (requestId === selectionRequestRef.current) {
+          selectionPendingRef.current = false
           setLoadingSession(false)
         }
       }
     },
-    [activateRun, applySession],
+    [activateRun, applySession, run.status],
   )
 
   const refreshSession = useCallback(
@@ -202,18 +222,33 @@ export function useWorkbench() {
 
   const createSession = useCallback(
     async (title = '') => {
+      if (run.status !== 'idle') {
+        throw new Error('运行期间无法新建会话')
+      }
       setError(null)
-      const selectionAtStart = selectedSessionIdRef.current
-      const selectionRequestAtStart = selectionRequestRef.current
+      const requestId = ++selectionRequestRef.current
+      selectedSessionIdRef.current = null
+      setSelectedSessionId(null)
+      selectionPendingRef.current = true
+      setLoadingSession(true)
+      applySession(null)
+      dispatch({
+        id: -1,
+        type: 'session_changed',
+        run_id: '',
+        session_id: '',
+        ts: Date.now() / 1000,
+        agent: 'main',
+        data: {},
+      })
       try {
         const created = await api.createSession(title)
         const shouldSelectCreated =
-          selectionRequestRef.current === selectionRequestAtStart &&
-          selectedSessionIdRef.current === selectionAtStart
+          selectionRequestRef.current === requestId && selectedSessionIdRef.current === null
         if (shouldSelectCreated) {
           selectedSessionIdRef.current = created.id
+          setSelectedSessionId(created.id)
         }
-        const requestId = shouldSelectCreated ? ++selectionRequestRef.current : selectionRequestRef.current
         const detail = await api.session(created.id)
         if (
           shouldSelectCreated &&
@@ -227,13 +262,24 @@ export function useWorkbench() {
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : '无法创建会话')
         throw cause
+      } finally {
+        if (requestId === selectionRequestRef.current) {
+          selectionPendingRef.current = false
+          setLoadingSession(false)
+        }
       }
     },
-    [applySession, refreshSessions],
+    [applySession, refreshSessions, run.status],
   )
 
   const start = useCallback(
     async (question: string) => {
+      if (selectionPendingRef.current) {
+        throw new Error('会话仍在加载')
+      }
+      if (run.status !== 'idle') {
+        throw new Error('已有研究正在运行')
+      }
       setError(null)
       try {
         const target = sessionRef.current ?? (await createSession())
@@ -245,7 +291,7 @@ export function useWorkbench() {
         throw cause
       }
     },
-    [activateRun, createSession, refreshSessions],
+    [activateRun, createSession, refreshSessions, run.status],
   )
 
   const decide = useCallback(
@@ -285,7 +331,7 @@ export function useWorkbench() {
     } catch (cause) {
       dispatch({
         id: -1,
-        type: 'error',
+        type: 'cancel_failed',
         run_id: runId,
         session_id: activeRunRef.current?.sessionId ?? '',
         ts: Date.now() / 1000,
@@ -329,6 +375,8 @@ export function useWorkbench() {
     error,
     loadingSessions,
     loadingSession,
+    sessionsLoaded,
+    selectedSessionId,
     refreshSessions,
     refreshSession,
     selectSession,

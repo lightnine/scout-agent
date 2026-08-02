@@ -17,7 +17,13 @@ function sourceHost(value: string): string {
   }
 }
 
-export function SourcesPanel({ sources }: { sources: Source[] }) {
+export function SourcesPanel({
+  sources,
+  loading = false,
+}: {
+  sources: Source[]
+  loading?: boolean
+}) {
   const safeSources = sources.flatMap((source) => {
     const url = safeExternalUrl(source.url)
     return url ? [{ ...source, url }] : []
@@ -30,10 +36,15 @@ export function SourcesPanel({ sources }: { sources: Source[] }) {
           <span className="eyebrow">Evidence</span>
           <h2 id="sources-title">研究来源</h2>
         </div>
-        <span className="count-badge">{safeSources.length}</span>
+        <span className="count-badge">{loading ? '—' : safeSources.length}</span>
       </div>
 
-      {sources.length === 0 ? (
+      {loading ? (
+        <div className="compact-state" role="status">
+          <span className="spinner" aria-hidden="true" />
+          正在载入来源…
+        </div>
+      ) : sources.length === 0 ? (
         <div className="compact-state empty">
           <strong>暂无来源</strong>
           <span>引用的网页和文档会汇总在这里。</span>

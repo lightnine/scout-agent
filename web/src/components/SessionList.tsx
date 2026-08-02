@@ -16,6 +16,7 @@ export function SessionList({
   sessions,
   selectedId,
   loading,
+  loaded,
   disabled,
   onSelect,
   onNew,
@@ -23,6 +24,7 @@ export function SessionList({
   sessions: SessionSummary[]
   selectedId: string | null
   loading: boolean
+  loaded: boolean
   disabled: boolean
   onSelect: (id: string) => void | Promise<void>
   onNew: () => void | Promise<void>
@@ -52,6 +54,11 @@ export function SessionList({
           <span className="spinner" aria-hidden="true" />
           正在载入会话…
         </div>
+      ) : !loaded ? (
+        <div className="compact-state empty">
+          <strong>无法载入会话</strong>
+          <span>请检查连接后重试。</span>
+        </div>
       ) : sessions.length === 0 ? (
         <div className="compact-state empty">
           <strong>还没有研究会话</strong>
@@ -67,7 +74,7 @@ export function SessionList({
                   className={selected ? 'selected' : ''}
                   aria-current={selected ? 'page' : undefined}
                   onClick={() => void onSelect(session.id)}
-                  disabled={disabled && !selected}
+                  disabled={disabled}
                 >
                   <span className="session-title">{session.title || '未命名调研'}</span>
                   <span className="session-meta">

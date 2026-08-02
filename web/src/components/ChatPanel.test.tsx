@@ -44,6 +44,25 @@ describe('ChatPanel', () => {
     expect(input).toHaveValue('第一行\n第二行')
   })
 
+  it('does not submit Enter while a Chinese IME composition is active', () => {
+    const onSubmit = vi.fn()
+    render(
+      <ChatPanel
+        messages={[]}
+        streamingText=""
+        status="idle"
+        onSubmit={onSubmit}
+      />,
+    )
+    const input = screen.getByLabelText('研究问题')
+
+    fireEvent.change(input, { target: { value: '向量数' } })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(input).toHaveValue('向量数')
+  })
+
   it('does not duplicate a finalized streaming answer', () => {
     render(
       <ChatPanel
@@ -68,5 +87,23 @@ describe('ChatPanel', () => {
     )
 
     expect(screen.getByText('从一个研究问题开始')).toBeInTheDocument()
+  })
+
+  it('distinguishes detail loading from an empty or stale conversation', () => {
+    render(
+      <ChatPanel
+        messages={[{ role: 'assistant', content: '旧会话回答' }]}
+        streamingText="旧流式内容"
+        status="idle"
+        loading
+        onSubmit={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('正在载入对话…')).toBeInTheDocument()
+    expect(screen.queryByText('从一个研究问题开始')).toBeNull()
+    expect(screen.queryByText('旧会话回答')).toBeNull()
+    expect(screen.queryByText('旧流式内容')).toBeNull()
+    expect(screen.getByLabelText('研究问题')).toBeDisabled()
   })
 })
