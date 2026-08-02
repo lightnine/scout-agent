@@ -107,6 +107,33 @@ export function useWorkbench() {
     [applySession],
   )
 
+  const refreshCompletedSession = useCallback(
+    async (id: string) => {
+      if (selectedSessionIdRef.current !== id) {
+        return
+      }
+      const selectionRequestId = selectionRequestRef.current
+      try {
+        const detail = await api.session(id)
+        if (
+          selectionRequestId === selectionRequestRef.current &&
+          selectedSessionIdRef.current === id
+        ) {
+          applySession(detail)
+        }
+      } catch (cause) {
+        if (
+          selectionRequestId === selectionRequestRef.current &&
+          selectedSessionIdRef.current === id
+        ) {
+          setError(cause instanceof Error ? cause.message : '无法刷新会话')
+        }
+        throw cause
+      }
+    },
+    [applySession],
+  )
+
   useEffect(() => {
     void refreshSessions().catch(() => undefined)
   }, [refreshSessions])
@@ -154,11 +181,11 @@ export function useWorkbench() {
       setActiveRun(null)
       void refreshSessions().catch(() => undefined)
       if (completedRun) {
-        void refreshSession(completedRun.sessionId).catch(() => undefined)
+        void refreshCompletedSession(completedRun.sessionId).catch(() => undefined)
       }
     }
     previousStatusRef.current = run.status
-  }, [refreshSession, refreshSessions, run.status])
+  }, [refreshCompletedSession, refreshSessions, run.status])
 
   const createSession = useCallback(
     async (title = '') => {

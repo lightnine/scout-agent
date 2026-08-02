@@ -167,9 +167,52 @@ describe('useWorkbench', () => {
       })
     })
 
-    await waitFor(() =>
-      expect(apiMock.session.mock.calls.filter(([id]) => id === 'created')).toHaveLength(2),
-    )
+    expect(apiMock.session.mock.calls.filter(([id]) => id === 'created')).toHaveLength(1)
     expect(result.current.session?.id).toBe('existing')
+  })
+
+  it('does not invalidate a pending selection when an unrelated run completes', async () => {
+    const target = deferred<SessionDetail>()
+    const listeners = new Map<string, (event: SSEEnvelope) => void>()
+    apiMock.session.mockImplementation((id: string) =>
+      id === 'target-a' ? target.promise : Promise.resolve(session(id)),
+    )
+    apiMock.startRun.mockResolvedValue({ run_id: 'r-origin-b', session_id: 'origin-b' })
+    subscribeMock.mockImplementation(
+      (runId: string, onEvent: (event: SSEEnvelope) => void) => {
+        listeners.set(runId, onEvent)
+        return vi.fn()
+      },
+    )
+    const { result } = renderHook(() => useWorkbench())
+
+    await act(async () => {
+      await result.current.selectSession('origin-b')
+      await result.current.start('question')
+    })
+    await waitFor(() => expect(listeners.get('r-origin-b')).toBeDefined())
+
+    act(() => {
+      void result.current.selectSession('target-a')
+    })
+    await waitFor(() => expect(apiMock.session).toHaveBeenCalledWith('target-a'))
+
+    act(() => {
+      listeners.get('r-origin-b')?.({
+        id: 1,
+        type: 'run_end',
+        run_id: 'r-origin-b',
+        session_id: 'origin-b',
+        ts: 0,
+        agent: 'main',
+        data: {},
+      })
+    })
+
+    await act(async () => {
+      target.resolve(session('target-a'))
+    })
+
+    await waitFor(() => expect(result.current.session?.id).toBe('target-a'))
   })
 })
