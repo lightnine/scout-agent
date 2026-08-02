@@ -29,6 +29,8 @@ class EventType(StrEnum):
     SUBAGENT_START = "subagent_start"
     SUBAGENT_END = "subagent_end"
     ERROR = "error"
+    APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_RESOLVED = "approval_resolved"
 
 
 @dataclass(slots=True)
