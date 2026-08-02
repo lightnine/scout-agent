@@ -545,8 +545,9 @@ flowchart LR
     A["Agent / Tool / Worker"] -->|"emit(Event)"| B["EventBus"]
     B --> C["Renderer<br/>终端实时展示"]
     B --> D["TraceRecorder<br/>写入 JSONL"]
-    B -.未来扩展.-> E["Web / SSE"]
-    B -.未来扩展.-> F["Prometheus / OpenTelemetry"]
+    B --> E["RunManager<br/>SSE 缓冲与重放"]
+    E --> F["Web 工作台"]
+    B -.未来扩展.-> G["Prometheus / OpenTelemetry"]
 ```
 
 每个 `Event` 包含四项：
@@ -578,7 +579,7 @@ run_start
 
 `EventBus.emit()` 会把同一个事件依次交给所有订阅者。某个订阅者异常会被隔离，不能拖垮 Agent Loop。当前 EventBus 是**进程内、同步广播**，不是分布式消息队列。
 
-### 9.2 两个订阅者
+### 9.2 三条消费路径
 
 **Renderer：实时回答“现在运行到哪了”**
 
@@ -622,6 +623,31 @@ jq -r 'select(.type=="llm_end") |
 jq 'select(.type=="subagent_start" or .type=="subagent_end")' .scout/traces.jsonl
 ```
 
+**RunManager + SSE：把真实运行状态交给 Web 工作台**
+
+`scout-web` 为单用户本地工作台创建一套 `Runtime`、`WebApprovalGateway` 和 `RunManager`。REST 负责会话与运行控制，SSE 负责把同一批 Agent 事件实时送到 React 页面：
+
+```mermaid
+flowchart LR
+    UI["React SPA"] -->|"REST：会话 / 启动 / 停止"| API["FastAPI /api"]
+    API --> RM["RunManager"]
+    RM --> AG["真实 Agent"]
+    AG --> BUS["EventBus"]
+    BUS --> RM
+    RM -->|"带单调 ID 的 SSE"| UI
+    AG -->|"计划 / 风险工具待确认"| GW["WebApprovalGateway"]
+    UI -->|"审批决定"| GW
+```
+
+`RunManager` 在后台线程运行 Agent，同时为每次运行保留最近 500 个事件，并最多保留 20 次运行记录。每个 SSE envelope 都带运行内单调递增的 `id`；浏览器重连时使用 `Last-Event-ID`，服务端只重放更大的 ID，避免重复渲染。`run_end` 后前端关闭事件流并重新读取会话快照，因此最终消息、计划、来源和 token 用量以 SQLite 中的持久化状态为准。
+
+人在环中的两道闸门都阻塞 Agent 线程而不阻塞 Web 服务：
+
+1. 主 Agent 第一次成功调用 `update_plan` 后，必须等待计划批准；修改意见会回灌给 Agent，取消则终止运行。
+2. `ask` 模式下，CAUTION/DANGEROUS 工具通过同一网关请求批准；可允许一次、按工具在当前会话内允许、拒绝或取消运行。
+
+FastAPI 先注册全部 `/api/*` 路由，再挂载 SPA。源码检出优先读取 `web/dist`，wheel 安装读取 `scout/web/static`；只有不带扩展名的前端路径才回退到 `index.html`，缺失资源和未知 API 仍返回 404。
+
 ### 9.3 当前边界
 
 这是轻量级的 Agent 行为追踪，不是完整的生产级分布式可观测系统：
@@ -630,9 +656,10 @@ jq 'select(.type=="subagent_start" or .type=="subagent_end")' .scout/traces.json
 - `llm_delta` 数量大且事后分析价值低，TraceRecorder 不落盘；
 - 超长字符串截断到 500 字符，trace 用于定位问题，不用于存档全文；
 - 数据只写本地 JSONL，没有跨服务 trace/span、指标聚合和告警；
-- 多线程子 Agent 共用 TraceRecorder，通过锁保证每行完整写入。
+- 多线程子 Agent 共用 TraceRecorder，通过锁保证每行完整写入；
+- Web 服务是单进程、单用户模型，同一时刻只允许一个主运行；事件缓冲在内存中，进程重启后不能继续旧 SSE，但已完成的会话状态仍在 SQLite 中。
 
-它目前提供的是**运行进度展示 + 行为轨迹 + 基础性能/成本分析**。由于 Agent 只依赖 EventBus，将来增加 Web SSE、Prometheus 或 OpenTelemetry 订阅者时，不需要修改 Agent Loop。
+它目前提供的是**CLI/Web 运行进度展示 + 行为轨迹 + 基础性能/成本分析**。Agent 只依赖 EventBus，因此这些展示路径不侵入 Agent Loop。
 
 ## 10. 关键取舍
 
@@ -653,7 +680,7 @@ jq 'select(.type=="subagent_start" or .type=="subagent_end")' .scout/traces.json
 
 ## 11. 测试策略
 
-55 个单测，**不联网、不消耗 token、全部确定性**，0.5 秒跑完。
+Python 与前端单元测试都使用确定性输入，不消耗真实模型 token。
 
 核心手段是 `FakeLLM`：按预设剧本返回消息，让整个 Agent Loop 可以离线驱动。
 
@@ -677,6 +704,8 @@ runtime_factory([
 
 爬虫和 schema 生成这两类代码最容易悄悄腐烂，所以用固定样本锁住行为。
 
+Web 端另有一条 Playwright 场景：它启动真实 FastAPI、Agent、RunManager、审批网关、REST 与 SSE，使用确定性假模型和临时工作区，覆盖会话创建/选择、计划批准、风险工具批准、流式最终输出、来源恢复和停止状态。测试不调用真实模型或公网，并在服务退出时清理临时工作区。
+
 ## 12. 实测数据
 
 一次真实运行（问题：Qdrant 和 Milvus 的架构与适用场景对比）：
@@ -697,7 +726,5 @@ runtime_factory([
 
 1. **评测集**：固定 20 个调研问题 + 人工标注答案，每次改提示词后回归打分。没有评测的提示词调优就是碰运气。
 2. **成本控制**：按 token 预算而不是步数限制，并按模型定价换算成金额展示。
-3. **人在环中**：计划制定后暂停等用户确认，避免方向跑偏后浪费几十步。
-4. **更多数据源**：arXiv、GitHub、内部知识库（对接现有 MCP server）。
-5. **正文提取升级**：接 readability，处理动态渲染页面。
-6. **Web 界面**：事件总线已经解耦，加一个 SSE 订阅者即可。
+3. **更多数据源**：GitHub、内部知识库（对接现有 MCP server）。
+4. **抓取质量改进**：在保持依赖可控的前提下提升复杂页面处理能力。

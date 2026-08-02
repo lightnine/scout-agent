@@ -41,6 +41,7 @@
 | 子 Agent | `core/agent.py` | 独立上下文、共享证据库，可并行调研多个子课题 |
 | 事件流 | `core/events.py` | Agent 不 print，只发事件；CLI / Trace 各自订阅 |
 | 可观测 | `observability/trace.py` | 全过程 JSONL 落盘，可 `jq` 分析 |
+| Web 工作台 | `web/` + `scout/web/` | 会话、计划与来源展示，REST/SSE 实时运行，计划和风险工具人工审批 |
 
 ## 快速开始
 
@@ -57,6 +58,40 @@ uv run scout                              # 交互模式
 uv run scout "GraphRAG 和传统 RAG 的区别"   # 单次执行
 uv run scout --auto --readonly "查点资料"   # 无人值守 + 禁止落盘
 ```
+
+### Web 工作台
+
+Web 工作台复用同一个 `Runtime`、Agent Loop、SQLite 会话和权限策略。主 Agent 第一次提交计划后会暂停等待确认；`ask` 模式下的风险工具也会弹出审批框，可允许一次、在当前会话内允许、拒绝或取消整次运行。页面可以停止运行，并在重新选择会话后恢复已持久化的消息、计划、来源和用量。
+
+开发模式需要两个终端。先启动 API：
+
+```bash
+uv sync --extra web --extra dev
+uv run scout-web --workspace . --host 127.0.0.1 --port 8000 --reload
+```
+
+再启动 Vite；开发服务器会把 `/api` 代理到 `127.0.0.1:8000`：
+
+```bash
+cd web
+npm ci
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+浏览器打开 `http://127.0.0.1:5173`。
+
+生产模式先构建 SPA，再由 `scout-web` 在同一端口提供 API 和静态文件：
+
+```bash
+uv sync --extra web
+cd web
+npm ci
+npm run build
+cd ..
+uv run scout-web --workspace . --host 127.0.0.1 --port 8080
+```
+
+浏览器打开 `http://127.0.0.1:8080`。源码检出时服务读取 `web/dist`；构建 wheel 时这些文件会被打包到 `scout/web/static`，安装后的 `scout-web` 直接提供同一套页面。`/api/*` 始终由 FastAPI 处理，其他不带扩展名的路径回退到 SPA 入口。
 
 ### 搜索后端
 
@@ -88,6 +123,7 @@ src/scout/
 ├── runtime.py           依赖装配（唯一知道"谁依赖谁"的地方）
 ├── permissions.py       权限策略与人工审批
 ├── cli.py               终端界面：事件流 → 彩色输出
+├── web/                 FastAPI REST/SSE、审批网关、运行管理与 SPA 托管
 ├── llm/
 │   ├── base.py          Message / ToolCall / Usage 统一模型
 │   └── openai_compat.py OpenAI 兼容端点，含流式 tool_call 分片重组与重试
@@ -115,6 +151,9 @@ src/scout/
 │   └── events.py        事件总线
 └── observability/
     └── trace.py         JSONL Trace
+web/
+├── src/                 React 工作台
+└── e2e/                 Playwright 确定性端到端场景
 ```
 
 ## 换模型 / 换搜索后端
@@ -139,9 +178,15 @@ LLM_API_KEY=EMPTY
 ```bash
 uv run pytest -q          # 全部单测，不联网、不消耗 token
 uv run ruff check src tests
+cd web
+npm run test
+npm run typecheck
+npm run lint
+npm run build
+npm run e2e
 ```
 
-测试用 `FakeLLM` 按剧本驱动整个 Loop，覆盖终止条件、工具回灌、重复调用保护、子 Agent 隔离、上下文压缩不切断工具链等关键行为。
+Python 测试用 `FakeLLM` 按剧本驱动整个 Loop。Playwright 场景启动真实 FastAPI、Agent、RunManager、审批网关、REST 与 SSE，但使用确定性模型剧本和临时工作区，不访问真实模型或公网。
 
 设计取舍的详细说明见 [docs/design.md](docs/design.md)。
 

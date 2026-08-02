@@ -39,6 +39,32 @@ def test_health_and_session_creation(settings):
         assert detail.json()["run_status"] == "idle"
 
 
+def test_spa_serves_index_deep_links_and_assets_without_swallowing_api(
+    settings, tmp_path, monkeypatch
+):
+    static = tmp_path / "static"
+    assets = static / "assets"
+    assets.mkdir(parents=True)
+    (static / "index.html").write_text("<html><body>scout-spa</body></html>", encoding="utf-8")
+    (assets / "app.js").write_text("window.SCOUT = true", encoding="utf-8")
+    monkeypatch.setattr("scout.web.app._find_static_dir", lambda: static, raising=False)
+
+    with make_client(settings) as client:
+        assert client.get("/").text == "<html><body>scout-spa</body></html>"
+        assert client.get("/sessions/restored").text == "<html><body>scout-spa</body></html>"
+        assert client.get("/assets/app.js").text == "window.SCOUT = true"
+
+        missing_asset = client.get("/assets/missing.js")
+        assert missing_asset.status_code == 404
+        assert "scout-spa" not in missing_asset.text
+
+        for method in ("get", "post"):
+            missing_api = getattr(client, method)("/api/not-a-route")
+            assert missing_api.status_code == 404
+            assert missing_api.headers["content-type"].startswith("application/json")
+            assert "scout-spa" not in missing_api.text
+
+
 @pytest.mark.parametrize("last_event_id", ["", " ", "\t", "+1", "-1", "1.0", "one"])
 def test_events_reject_non_decimal_last_event_id(settings, last_event_id):
     with make_client(settings) as client:

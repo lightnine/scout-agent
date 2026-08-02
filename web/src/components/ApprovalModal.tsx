@@ -31,6 +31,9 @@ export function ApprovalModal({
   const isPlan = approval.kind === 'plan'
 
   useEffect(() => {
+    setFeedback('')
+    setSubmitting(false)
+    setSubmitError('')
     const previousFocus = document.activeElement
     initialFocusRef.current?.focus()
     return () => {
@@ -38,7 +41,7 @@ export function ApprovalModal({
         previousFocus.focus()
       }
     }
-  }, [])
+  }, [approval.approval_id])
 
   const decide = async (action: ApprovalAction, decisionFeedback = '') => {
     if (submitting || (action === 'revise' && !decisionFeedback.trim())) {

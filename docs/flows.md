@@ -1,11 +1,12 @@
 # Scout 执行流程
 
-本文档总结两个核心流程：
+本文档总结三个核心流程：
 
 1. **`uv run scout` 启动时做了什么**
 2. **用户输入 query 后，Agent 如何执行**
+3. **`scout-web` 如何通过 REST/SSE 驱动同一个 Agent，并完成人在环审批**
 
-对应源码入口：`pyproject.toml` → `scout.cli:main` → `cli.py` → `runtime.py` → `core/agent.py`。
+对应源码入口：`pyproject.toml` → `scout.cli:main` / `scout.web_cli:main` → `runtime.py` → `core/agent.py`。
 
 ---
 
@@ -446,7 +447,87 @@ flowchart LR
 
 ---
 
-## 3. 两个流程的关系
+## 3. Web 工作台流程
+
+### 3.1 启动与静态资源
+
+开发时，Vite 在 `127.0.0.1:5173` 提供页面并把 `/api` 代理到 `scout-web` 的 `127.0.0.1:8000`。生产时先执行 `npm run build`，再由一个 `scout-web` 进程同时提供 API 与 SPA：
+
+```mermaid
+flowchart TD
+    CMD["uv run scout-web"] --> CLI["web_cli.main()"]
+    CLI --> APP["create_app()"]
+    APP --> SETTINGS["load_settings(workspace)"]
+    APP --> RUNTIME["Runtime + SQLite + EventBus"]
+    APP --> GATEWAY["WebApprovalGateway"]
+    APP --> MANAGER["RunManager"]
+    APP --> API["先注册 /api/*"]
+    APP --> STATIC["后挂载 SPA"]
+    STATIC --> SOURCE{"运行位置"}
+    SOURCE -->|"源码检出"| DIST["web/dist"]
+    SOURCE -->|"wheel 安装"| PACKAGE["scout/web/static"]
+```
+
+挂载顺序是路由正确性的边界：未知 `/api/*` 不会回退到 `index.html`；缺失的带扩展名资源保持 404；其他不带扩展名的路径回退到 SPA 入口，以支持直接刷新前端深链接。
+
+### 3.2 会话、运行与 SSE
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant SPA as React SPA
+    participant API as FastAPI
+    participant RM as RunManager
+    participant A as Agent
+    participant DB as SQLite
+
+    U->>SPA: 新建或选择会话
+    SPA->>API: POST /api/sessions 或 GET /api/sessions/{id}
+    API->>DB: 创建 / 读取会话快照
+    DB-->>SPA: 消息、计划、来源、用量、active_run_id
+
+    U->>SPA: 提交问题
+    SPA->>API: POST /api/sessions/{id}/runs
+    API->>RM: start_run()
+    RM->>A: 后台线程 agent.run(stream=True)
+    API-->>SPA: run_id
+    SPA->>API: GET /api/runs/{run_id}/events
+    A-->>RM: EventBus 结构化事件
+    RM-->>SPA: SSE envelope（id/type/run_id/data）
+    A->>DB: 运行结束后持久化
+    SPA->>API: run_end 后重新读取会话快照
+```
+
+同一进程只允许一个主运行。SSE 事件 ID 在单次运行内单调递增；浏览器断线重连会携带 `Last-Event-ID`，服务端从下一个 ID 开始重放。刷新页面后，前端先读取会话快照；若 `active_run_id` 仍存在，再接回该运行的 SSE。
+
+### 3.3 计划与风险工具审批
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant GW as WebApprovalGateway
+    participant SSE as RunManager / SSE
+    participant UI as 审批弹窗
+
+    A->>A: update_plan 成功
+    A->>GW: request(kind=plan)
+    GW-->>SSE: approval_required
+    SSE-->>UI: 展示计划
+    UI->>GW: approve / revise / cancel
+    GW-->>SSE: approval_resolved
+    GW-->>A: 返回决定
+
+    A->>GW: ask 模式风险工具 request(kind=tool)
+    GW-->>UI: 工具名、参数与风险
+    UI->>GW: approve / allow_session / reject / cancel
+    GW-->>A: 放行、拒绝或终止运行
+```
+
+计划审批发生在主 Agent 第一次成功提交计划之后、继续执行其他工具之前。风险工具审批复用 `PolicyApprover`：`allow_session` 只对当前会话中的同名工具生效。点击“停止运行”会先把 UI 状态切为 `cancelling`，再调用 `POST /api/runs/{run_id}/cancel`；取消令牌和审批网关共同唤醒可能阻塞的运行，最终由 `run_end` 收敛为空闲状态。
+
+---
+
+## 4. 三个流程的关系
 
 ```mermaid
 flowchart TB
@@ -460,14 +541,23 @@ flowchart TB
         TOOLS["工具调用"]
         OUT["输出结果"]
     end
+    subgraph Web["流程 3: Web 控制与展示"]
+        REST["REST：会话 / 运行 / 审批"]
+        SSE["SSE：事件流与重放"]
+        SPA["React SPA"]
+    end
 
     INIT --> QUERY
     QUERY --> LOOP --> TOOLS --> OUT
     OUT -->|交互模式继续等待| QUERY
     OUT -->|/quit 或单次模式| CLOSE["runtime.close()"]
+    REST --> QUERY
+    LOOP --> SSE --> SPA
+    SPA --> REST
 ```
 
 **一句话总结**：
 
 - **流程 1** 是"把机器开起来"——读配置、连数据库、注册工具、创建 Agent，只做一次。
 - **流程 2** 是"开始干活"——每输入一个问题，Agent 就在 Loop 里反复「想 → 调工具 → 看结果 → 再想」，直到给出最终答案。
+- **流程 3** 是"让浏览器安全地控制和观察同一个 Loop"——REST 发命令，SSE 收事件，审批网关在关键节点等待人的决定。
