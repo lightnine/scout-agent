@@ -90,11 +90,9 @@ class Agent:
         stream: bool = True,
         run_id: str | None = None,
         *,
-        reset_cancellation: bool | None = None,
+        reset_cancellation: bool = True,
     ) -> AgentResult:
         run_id = run_id or uuid.uuid4().hex[:8]
-        if reset_cancellation is None:
-            reset_cancellation = self.role != "worker"
         if reset_cancellation:
             self.cancellation.clear()
         self.registry.ctx.run_id = run_id

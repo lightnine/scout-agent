@@ -323,7 +323,12 @@ def test_worker_start_does_not_clear_parent_cancellation(settings):
             cancellation=cancellation,
         )
 
-        result = worker.run("delegated research", stream=False, run_id="parent-run")
+        result = worker.run(
+            "delegated research",
+            stream=False,
+            run_id="parent-run",
+            reset_cancellation=False,
+        )
     finally:
         runtime.close()
 

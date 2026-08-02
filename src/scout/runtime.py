@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from .approval import ApprovalGateway
+from .cancellation import RunCancellation
 from .config import Settings
 from .core.agent import Agent
 from .core.events import EventBus
@@ -63,7 +64,12 @@ class Runtime:
         return self.store.list_sessions(limit)
 
     # ---------------------------------------------------------------- Agent
-    def build_agent(self, session: Session) -> Agent:
+    def build_agent(
+        self,
+        session: Session,
+        cancellation: RunCancellation | None = None,
+    ) -> Agent:
+        token = cancellation or RunCancellation()
         ctx = ToolContext(
             workspace=self.settings.workspace,
             settings=self.settings,
@@ -72,6 +78,7 @@ class Runtime:
             evidence=session.evidence,
             session=session,
             emit=lambda name, data: self.bus.emit(name, data),
+            cancellation=token,
         )
         registry = build_registry(ctx, self.approver, self.settings.parallel_tool_calls)
         agent = Agent(
@@ -82,6 +89,7 @@ class Runtime:
             bus=self.bus,
             memory=self.memory,
             approval_gateway=self.approval_gateway,
+            cancellation=token,
         )
         # 子 Agent 的派生函数依赖 Agent 自身，因此在 Agent 创建后回填
         ctx.spawn = agent.make_spawner()
