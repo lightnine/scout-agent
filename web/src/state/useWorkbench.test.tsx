@@ -123,6 +123,71 @@ describe('useWorkbench', () => {
     expect(apiMock.startRun).not.toHaveBeenCalled()
   })
 
+  it('preserves detail failure through dismiss and clears it after retry succeeds', async () => {
+    const retry = deferred<SessionDetail>()
+    apiMock.session
+      .mockRejectedValueOnce(new Error('detail offline'))
+      .mockReturnValueOnce(retry.promise)
+    const { result } = renderHook(() => useWorkbench())
+
+    await act(async () => {
+      await expect(result.current.selectSession('a')).rejects.toThrow('detail offline')
+    })
+    expect(result.current.session).toBeNull()
+    expect(result.current.sessionLoadFailed).toBe(true)
+    expect(result.current.error).toBe('detail offline')
+
+    act(() => result.current.dismissError())
+    expect(result.current.error).toBeNull()
+    expect(result.current.sessionLoadFailed).toBe(true)
+
+    act(() => result.current.reconnect())
+    expect(result.current.loadingSession).toBe(true)
+    expect(result.current.session).toBeNull()
+    await act(async () => {
+      await expect(result.current.start('must wait')).rejects.toThrow('会话仍在加载')
+    })
+    expect(apiMock.startRun).not.toHaveBeenCalled()
+
+    await act(async () => {
+      retry.resolve(session('a'))
+    })
+    await waitFor(() => expect(result.current.loadingSession).toBe(false))
+    expect(result.current.session?.id).toBe('a')
+    expect(result.current.sessionLoadFailed).toBe(false)
+    expect(result.current.error).toBeNull()
+  })
+
+  it('does not let a late detail retry overwrite a newer selection', async () => {
+    const retryA = deferred<SessionDetail>()
+    let aRequests = 0
+    apiMock.session.mockImplementation((id: string) => {
+      if (id === 'a') {
+        aRequests += 1
+        return aRequests === 1 ? Promise.reject(new Error('detail offline')) : retryA.promise
+      }
+      return Promise.resolve(session(id))
+    })
+    const { result } = renderHook(() => useWorkbench())
+
+    await act(async () => {
+      await expect(result.current.selectSession('a')).rejects.toThrow('detail offline')
+    })
+    act(() => result.current.reconnect())
+    expect(result.current.loadingSession).toBe(true)
+
+    await act(async () => {
+      await result.current.selectSession('b')
+    })
+    expect(result.current.session?.id).toBe('b')
+
+    await act(async () => {
+      retryA.resolve(session('a'))
+    })
+    expect(result.current.session?.id).toBe('b')
+    expect(result.current.selectedSessionId).toBe('b')
+  })
+
   it('transitions to cancelling before the cancel request resolves', async () => {
     apiMock.session.mockResolvedValue(session('s1'))
     apiMock.startRun.mockResolvedValue({ run_id: 'r1', session_id: 's1' })

@@ -386,6 +386,10 @@ a:focus-visible {
   background: var(--indigo);
 }
 
+.session-list button.selected .session-meta {
+  color: var(--slate-600);
+}
+
 .session-list button:disabled {
   opacity: 0.62;
 }

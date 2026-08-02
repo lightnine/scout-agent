@@ -106,4 +106,24 @@ describe('ChatPanel', () => {
     expect(screen.queryByText('旧流式内容')).toBeNull()
     expect(screen.getByLabelText('研究问题')).toBeDisabled()
   })
+
+  it('keeps a selected-session load failure distinct from onboarding', () => {
+    const onRetry = vi.fn()
+    render(
+      <ChatPanel
+        messages={[]}
+        streamingText=""
+        status="idle"
+        failed
+        onRetry={onRetry}
+        onSubmit={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('无法载入所选会话')).toBeInTheDocument()
+    expect(screen.queryByText('从一个研究问题开始')).toBeNull()
+    expect(screen.getByLabelText('研究问题')).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '重试载入会话' }))
+    expect(onRetry).toHaveBeenCalledOnce()
+  })
 })

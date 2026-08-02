@@ -17,12 +17,16 @@ export function ChatPanel({
   streamingText,
   status,
   loading = false,
+  failed = false,
+  onRetry,
   onSubmit,
 }: {
   messages: Message[]
   streamingText: string
   status: RunState['status']
   loading?: boolean
+  failed?: boolean
+  onRetry?: () => void
   onSubmit: (question: string) => Promise<void>
 }) {
   const [question, setQuestion] = useState('')
@@ -35,7 +39,7 @@ export function ChatPanel({
   const showStream =
     Boolean(streamingText) &&
     !(lastMessage?.role === 'assistant' && lastMessage.content.trim() === streamingText.trim())
-  const disabled = loading || status !== 'idle' || submitting
+  const disabled = loading || failed || status !== 'idle' || submitting
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -84,6 +88,16 @@ export function ChatPanel({
           <div className="compact-state chat-detail-loading" role="status">
             <span className="spinner" aria-hidden="true" />
             正在载入对话…
+          </div>
+        ) : failed ? (
+          <div className="empty-state chat-empty detail-error" role="status">
+            <strong>无法载入所选会话</strong>
+            <p>会话内容暂时不可用，可以重试载入。</p>
+            {onRetry && (
+              <button className="button secondary" onClick={onRetry}>
+                重试载入会话
+              </button>
+            )}
           </div>
         ) : (
           <>
@@ -141,7 +155,9 @@ export function ChatPanel({
         <div className="composer-footer">
           <span><kbd>Enter</kbd> 提交 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span>
           <button className="button primary submit-button" disabled={disabled || !question.trim()}>
-            <span>{loading ? '正在载入' : submitting ? '正在提交' : statusCopy[status]}</span>
+            <span>
+              {loading ? '正在载入' : failed ? '载入失败' : submitting ? '正在提交' : statusCopy[status]}
+            </span>
             <svg viewBox="0 0 20 20" aria-hidden="true">
               <path d="m4 10 11-6-3.2 12-2.1-4.1L4 10Z" />
             </svg>

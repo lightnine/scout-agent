@@ -45,7 +45,11 @@ export default function App() {
               await workbench.createSession()
             }}
           />
-          <PlanPanel plan={currentPlan} loading={workbench.loadingSession} />
+          <PlanPanel
+            plan={currentPlan}
+            loading={workbench.loadingSession}
+            failed={workbench.sessionLoadFailed}
+          />
         </aside>
 
         <div className="center-column" aria-busy={workbench.loadingSession}>
@@ -60,6 +64,8 @@ export default function App() {
             streamingText={workbench.run.streamingText}
             status={workbench.run.status}
             loading={workbench.loadingSession}
+            failed={workbench.sessionLoadFailed}
+            onRetry={workbench.reconnect}
             onSubmit={workbench.start}
           />
         </div>
@@ -69,10 +75,12 @@ export default function App() {
           <SourcesPanel
             sources={workbench.session?.sources ?? []}
             loading={workbench.loadingSession}
+            failed={workbench.sessionLoadFailed}
           />
           <MetricsPanel
             usage={workbench.session?.usage ?? null}
             loading={workbench.loadingSession}
+            failed={workbench.sessionLoadFailed}
           />
         </aside>
       </div>

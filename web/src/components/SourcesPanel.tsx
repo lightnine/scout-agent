@@ -20,9 +20,11 @@ function sourceHost(value: string): string {
 export function SourcesPanel({
   sources,
   loading = false,
+  failed = false,
 }: {
   sources: Source[]
   loading?: boolean
+  failed?: boolean
 }) {
   const safeSources = sources.flatMap((source) => {
     const url = safeExternalUrl(source.url)
@@ -36,13 +38,18 @@ export function SourcesPanel({
           <span className="eyebrow">Evidence</span>
           <h2 id="sources-title">研究来源</h2>
         </div>
-        <span className="count-badge">{loading ? '—' : safeSources.length}</span>
+        <span className="count-badge">{loading || failed ? '—' : safeSources.length}</span>
       </div>
 
       {loading ? (
         <div className="compact-state" role="status">
           <span className="spinner" aria-hidden="true" />
           正在载入来源…
+        </div>
+      ) : failed ? (
+        <div className="compact-state empty">
+          <strong>研究来源载入失败</strong>
+          <span>重试会话后将恢复来源。</span>
         </div>
       ) : sources.length === 0 ? (
         <div className="compact-state empty">

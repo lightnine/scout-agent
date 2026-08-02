@@ -31,6 +31,7 @@ export function useWorkbench() {
   const [loadingSession, setLoadingSession] = useState(false)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [sessionLoadFailed, setSessionLoadFailed] = useState(false)
   const [connectionRevision, setConnectionRevision] = useState(0)
   const sessionRef = useRef<SessionDetail | null>(null)
   const selectedSessionIdRef = useRef<string | null>(null)
@@ -86,6 +87,7 @@ export function useWorkbench() {
       selectedSessionIdRef.current = id
       setSelectedSessionId(id)
       setError(null)
+      setSessionLoadFailed(false)
       setLoadingSession(true)
       selectionPendingRef.current = true
       applySession(null)
@@ -104,11 +106,13 @@ export function useWorkbench() {
           return
         }
         applySession(detail)
+        setSessionLoadFailed(false)
         if (detail.active_run_id) {
           activateRun({ runId: detail.active_run_id, sessionId: detail.id })
         }
       } catch (cause) {
         if (requestId === selectionRequestRef.current) {
+          setSessionLoadFailed(true)
           setError(cause instanceof Error ? cause.message : '无法加载会话')
         }
         throw cause
@@ -125,19 +129,44 @@ export function useWorkbench() {
   const refreshSession = useCallback(
     async (id: string) => {
       const requestId = ++selectionRequestRef.current
+      setError(null)
+      setSessionLoadFailed(false)
+      setLoadingSession(true)
+      selectionPendingRef.current = true
+      applySession(null)
+      dispatch({
+        id: -1,
+        type: 'session_changed',
+        run_id: '',
+        session_id: id,
+        ts: Date.now() / 1000,
+        agent: 'main',
+        data: {},
+      })
       try {
         const detail = await api.session(id)
         if (requestId === selectionRequestRef.current && selectedSessionIdRef.current === id) {
           applySession(detail)
+          setSessionLoadFailed(false)
+          setError(null)
+          if (detail.active_run_id) {
+            activateRun({ runId: detail.active_run_id, sessionId: detail.id })
+          }
         }
       } catch (cause) {
         if (requestId === selectionRequestRef.current) {
+          setSessionLoadFailed(true)
           setError(cause instanceof Error ? cause.message : '无法刷新会话')
         }
         throw cause
+      } finally {
+        if (requestId === selectionRequestRef.current) {
+          selectionPendingRef.current = false
+          setLoadingSession(false)
+        }
       }
     },
-    [applySession],
+    [activateRun, applySession],
   )
 
   const refreshCompletedSession = useCallback(
@@ -229,6 +258,7 @@ export function useWorkbench() {
       const requestId = ++selectionRequestRef.current
       selectedSessionIdRef.current = null
       setSelectedSessionId(null)
+      setSessionLoadFailed(false)
       selectionPendingRef.current = true
       setLoadingSession(true)
       applySession(null)
@@ -277,6 +307,9 @@ export function useWorkbench() {
       if (selectionPendingRef.current) {
         throw new Error('会话仍在加载')
       }
+      if (sessionLoadFailed) {
+        throw new Error('会话载入失败，请先重试')
+      }
       if (run.status !== 'idle') {
         throw new Error('已有研究正在运行')
       }
@@ -291,7 +324,7 @@ export function useWorkbench() {
         throw cause
       }
     },
-    [activateRun, createSession, refreshSessions, run.status],
+    [activateRun, createSession, refreshSessions, run.status, sessionLoadFailed],
   )
 
   const decide = useCallback(
@@ -377,6 +410,7 @@ export function useWorkbench() {
     loadingSession,
     sessionsLoaded,
     selectedSessionId,
+    sessionLoadFailed,
     refreshSessions,
     refreshSession,
     selectSession,

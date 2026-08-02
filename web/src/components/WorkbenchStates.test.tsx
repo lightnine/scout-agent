@@ -127,6 +127,23 @@ describe('workbench empty and error states', () => {
     expect(screen.queryByText('9')).toBeNull()
   })
 
+  it('shows selected-session failure instead of empty detail states', () => {
+    render(
+      <>
+        <PlanPanel plan="" failed />
+        <SourcesPanel sources={[]} failed />
+        <MetricsPanel usage={null} failed />
+      </>,
+    )
+
+    expect(screen.getByText('研究计划载入失败')).toBeInTheDocument()
+    expect(screen.getByText('研究来源载入失败')).toBeInTheDocument()
+    expect(screen.getByText('会话用量载入失败')).toBeInTheDocument()
+    expect(screen.queryByText('尚未制定计划')).toBeNull()
+    expect(screen.queryByText('暂无来源')).toBeNull()
+    expect(screen.queryByText('选择会话后查看用量。')).toBeNull()
+  })
+
   it('distinguishes no selected session from a loaded zero-usage session', () => {
     const { rerender } = render(<MetricsPanel usage={null} loading={false} />)
     expect(screen.getByText('选择会话后查看用量。')).toBeInTheDocument()

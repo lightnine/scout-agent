@@ -5,9 +5,11 @@ function metric(value: number | undefined): string {
 export function MetricsPanel({
   usage,
   loading = false,
+  failed = false,
 }: {
   usage: Record<string, number> | null
   loading?: boolean
+  failed?: boolean
 }) {
   const prompt = usage?.prompt_tokens ?? 0
   const completion = usage?.completion_tokens ?? 0
@@ -23,6 +25,11 @@ export function MetricsPanel({
         <div className="compact-state" role="status">
           <span className="spinner" aria-hidden="true" />
           正在载入用量…
+        </div>
+      ) : failed ? (
+        <div className="compact-state empty">
+          <strong>会话用量载入失败</strong>
+          <span>重试会话后将恢复用量。</span>
         </div>
       ) : usage === null ? (
         <div className="compact-state empty">
