@@ -175,8 +175,9 @@ class Agent:
             self._emit(EventType.ERROR, {"error": str(exc), "type": type(exc).__name__})
 
         if self.persist:
-            self.session.persist(pending)
             self.session.usage = self.session.usage + usage
+            self.session.persist(pending)
+            self.session.persist_state()
 
         result = AgentResult(final_text, step, usage, stop_reason, tool_call_count)
         self._emit(

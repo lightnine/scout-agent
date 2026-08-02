@@ -67,6 +67,24 @@ class Runtime:
     def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.store.list_sessions(limit)
 
+    def session_snapshot(self, session_id: str) -> dict[str, Any]:
+        session = self.resume_session(session_id)
+        return {
+            "id": session.id,
+            "title": session.title,
+            "messages": [message.to_dict() for message in session.working.messages],
+            "plan": session.plan.render(),
+            "plan_steps": session.plan.steps,
+            "plan_current": session.plan.current,
+            "sources": session.evidence.sources(),
+            "usage": {
+                "calls": session.usage.calls,
+                "prompt_tokens": session.usage.prompt_tokens,
+                "completion_tokens": session.usage.completion_tokens,
+                "cached_tokens": session.usage.cached_tokens,
+            },
+        }
+
     # ---------------------------------------------------------------- Agent
     def build_agent(
         self,

@@ -54,6 +54,7 @@ def update_plan(
         return ToolResult.failure("计划至少要有一步")
 
     ctx.session.plan = Plan(steps=steps, current=max(1, min(current, len(steps) + 1)))
+    ctx.session.persist_state()
     if ctx.emit:
         ctx.emit("plan_updated", {"plan": ctx.session.plan.render()})
     return ToolResult.success(

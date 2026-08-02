@@ -47,20 +47,53 @@ class Session:
 
     @classmethod
     def resume(cls, store: Store, llm, session_id: str, compact_threshold: int = 16000) -> Session:
+        row = store.get_session(session_id)
+        if row is None:
+            raise ValueError(f"找不到会话 {session_id}")
         payloads = store.load_messages(session_id)
         working = WorkingMemory(threshold=compact_threshold)
         working.extend([Message.from_dict(p) for p in payloads])
-        sessions = {s["id"]: s for s in store.list_sessions(limit=200)}
-        meta = sessions.get(session_id)
-        if meta is None:
-            raise ValueError(f"找不到会话 {session_id}")
+        plan, usage = cls._state_from_meta(row.get("meta", {}))
         return cls(
             id=session_id,
             store=store,
             working=working,
             evidence=EvidenceStore(store, session_id, llm),
-            title=meta.get("title", ""),
+            title=row.get("title", ""),
+            plan=plan,
+            usage=usage,
+            created_at=row.get("created_at", time.time()),
         )
+
+    @staticmethod
+    def _state_from_meta(meta: dict) -> tuple[Plan, Usage]:
+        plan_data = meta.get("plan", {})
+        usage_data = meta.get("usage", {})
+        return (
+            Plan(list(plan_data.get("steps", [])), int(plan_data.get("current", 0))),
+            Usage(
+                prompt_tokens=int(usage_data.get("prompt_tokens", 0)),
+                completion_tokens=int(usage_data.get("completion_tokens", 0)),
+                cached_tokens=int(usage_data.get("cached_tokens", 0)),
+                calls=int(usage_data.get("calls", 0)),
+            ),
+        )
+
+    def persist_state(self) -> None:
+        stored = self.store.get_session(self.id) or {}
+        meta = dict(stored.get("meta", {}))
+        meta.update(
+            {
+                "plan": {"steps": self.plan.steps, "current": self.plan.current},
+                "usage": {
+                    "prompt_tokens": self.usage.prompt_tokens,
+                    "completion_tokens": self.usage.completion_tokens,
+                    "cached_tokens": self.usage.cached_tokens,
+                    "calls": self.usage.calls,
+                },
+            }
+        )
+        self.store.update_session_meta(self.id, meta)
 
     def persist(self, messages: list[Message]) -> None:
         """只追加新产生的消息。压缩会改写内存里的消息序列，

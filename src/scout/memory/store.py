@@ -117,6 +117,25 @@ class Store:
                 (time.time(), title, session_id),
             )
 
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        rows = self._query(
+            """SELECT s.id, s.title, s.created_at, s.updated_at, s.meta,
+                      (SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id) AS message_count
+               FROM sessions s WHERE s.id=?""",
+            (session_id,),
+        )
+        if not rows:
+            return None
+        result = dict(rows[0])
+        result["meta"] = json.loads(result["meta"] or "{}")
+        return result
+
+    def update_session_meta(self, session_id: str, meta: dict[str, Any]) -> None:
+        self._execute(
+            "UPDATE sessions SET meta=?, updated_at=? WHERE id=?",
+            (json.dumps(meta, ensure_ascii=False), time.time(), session_id),
+        )
+
     def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self._query(
             """SELECT s.id, s.title, s.created_at, s.updated_at,
