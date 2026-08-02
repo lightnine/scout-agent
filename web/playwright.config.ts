@@ -1,6 +1,8 @@
 import { defineConfig } from '@playwright/test'
 
-const reuseExistingServer = !process.env.CI
+// Deterministic by default: Playwright must own both processes and fail clearly
+// if either fixed port is occupied. Reuse requires an explicit local opt-in.
+const reuseExistingServer = process.env.SCOUT_E2E_REUSE_SERVERS === '1'
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
 
 export default defineConfig({

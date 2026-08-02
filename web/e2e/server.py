@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -16,6 +17,9 @@ from scout.web.app import create_app
 
 COMPLETED_QUESTION = "Compare SQLite and DuckDB"
 CANCELLED_QUESTION = "Wait until stopped"
+PARTIAL_REPORT = "Deterministic report is streaming"
+FINAL_REPORT = f"{PARTIAL_REPORT} and then persisted [S1]."
+_stream_release = threading.Event()
 
 
 class E2ELLM:
@@ -82,11 +86,13 @@ class E2ELLM:
                 ],
             )
         else:
-            content = "Deterministic report complete with a persisted source [S1]."
+            _stream_release.clear()
             if stream and on_delta:
-                on_delta("Deterministic report ")
-                on_delta("complete with a persisted source [S1].")
-            message = Message(role="assistant", content=content)
+                on_delta(PARTIAL_REPORT)
+                if not _stream_release.wait(timeout=15):
+                    raise TimeoutError("E2E stream release was not received")
+                on_delta(" and then persisted [S1].")
+            message = Message(role="assistant", content=FINAL_REPORT)
 
         return LLMResponse(
             message=message,
@@ -123,3 +129,14 @@ settings = Settings(
 settings.ensure_dirs()
 runtime = E2ERuntime(settings, llm=E2ELLM(), enable_trace=False)
 app = create_app(settings=settings, runtime=runtime)
+
+
+@app.post("/api/e2e/release-stream")
+def release_stream() -> dict[str, str]:
+    _stream_release.set()
+    return {"status": "released"}
+
+
+# create_app mounts the production SPA last. This test-only route must precede
+# that catch-all mount and is intentionally defined only in this fixture.
+app.router.routes.insert(0, app.router.routes.pop())

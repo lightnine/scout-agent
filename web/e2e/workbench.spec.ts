@@ -21,7 +21,15 @@ test('creates and selects sessions, approves work, streams output, and stops a r
   await expect(toolDialog).toContainText('http://127.0.0.1:8000/api/health')
   await toolDialog.getByRole('button', { name: '本会话允许' }).click()
 
-  await expect(page.getByText(/Deterministic report complete/).first()).toBeVisible()
+  await expect(page.getByText('Deterministic report is streaming', { exact: true })).toBeVisible()
+  await expect(page.getByText('正在生成', { exact: true })).toBeVisible()
+  await expect(page.getByText('调研中', { exact: true })).toBeVisible()
+
+  const release = await page.request.post('/api/e2e/release-stream')
+  expect(release.status()).toBe(200)
+
+  const finalReport = 'Deterministic report is streaming and then persisted [S1].'
+  await expect(page.getByText(finalReport, { exact: true })).toBeVisible()
   await expect(
     page.getByRole('link', { name: /\[S1\].*Deterministic E2E Source/ }),
   ).toBeVisible()
@@ -30,7 +38,7 @@ test('creates and selects sessions, approves work, streams output, and stops a r
   await page.getByRole('button', { name: '新建会话' }).click()
   await expect(page.getByRole('button', { name: /未命名调研/ })).toBeVisible()
   await page.getByRole('button', { name: /Compare SQLite and DuckDB/ }).click()
-  await expect(page.getByText(/Deterministic report complete/)).toBeVisible()
+  await expect(page.getByText(finalReport, { exact: true })).toBeVisible()
   await expect(
     page.getByRole('link', { name: /\[S1\].*Deterministic E2E Source/ }),
   ).toBeVisible()
