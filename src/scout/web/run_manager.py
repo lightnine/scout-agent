@@ -188,6 +188,8 @@ class RunManager:
             record = self._active
         if record is None:
             return
+        if event.type in {EventType.RUN_START, EventType.RUN_END} and event.agent != "main":
+            return
 
         with record.condition:
             if event.type is EventType.APPROVAL_REQUIRED and record.status == "running":

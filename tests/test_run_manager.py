@@ -2,9 +2,12 @@ import threading
 import time
 
 import pytest
+from conftest import FakeLLM, assistant_tool_call
 
 from scout.approval import ApprovalAction, ApprovalKind, ApprovalRequest
 from scout.core.events import EventBus, EventType
+from scout.llm.base import Message
+from scout.runtime import Runtime
 from scout.web.gateway import WebApprovalGateway
 from scout.web.run_manager import (
     ActiveRunError,
@@ -12,6 +15,7 @@ from scout.web.run_manager import (
     RunManagerClosedError,
     RunNotFoundError,
 )
+from scout.web.sse import stream_events
 
 
 class BlockingAgent:
@@ -82,6 +86,76 @@ def test_replays_only_events_newer_than_requested_id_after_completion():
     assert [event.id for event in events] == [2, 3]
     assert record.status == "finished"
     assert manager.wait_for_events(record.run_id, after_id=3, timeout=0) is True
+
+
+def test_real_worker_lifecycle_does_not_terminate_lead_event_stream(settings):
+    llm = FakeLLM(
+        [
+            assistant_tool_call(
+                "research_subtopic",
+                {"topic": "worker lifecycle"},
+                call_id="delegate",
+            ),
+            Message(role="assistant", content="worker result"),
+            assistant_tool_call("list_dir", {"path": "."}, call_id="after-worker"),
+            Message(role="assistant", content="lead final"),
+        ]
+    )
+    runtime = Runtime(settings, llm=llm, enable_trace=False)
+    session = runtime.new_session()
+    manager = RunManager(runtime)
+
+    try:
+        record = manager.start_run(session.id, "research")
+        wait_for_thread(record)
+        events = manager.events_after(record.run_id, 0)
+        frames = list(stream_events(manager, record.run_id))
+    finally:
+        manager.shutdown()
+
+    lifecycle = [
+        (event.type, event.agent)
+        for event in events
+        if event.type in {"run_start", "run_end"}
+    ]
+    assert lifecycle == [("run_start", "main"), ("run_end", "main")]
+    assert events[-1].type == "run_end"
+    subagent_end_index = next(
+        index for index, event in enumerate(events) if event.type == "subagent_end"
+    )
+    later_tool_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.type == "tool_start" and event.data.get("id") == "after-worker"
+    )
+    assert subagent_end_index < later_tool_index < len(events) - 1
+    worker_name = next(
+        event.data["worker"] for event in events if event.type == "subagent_start"
+    )
+    assert any(event.type == "llm_end" and event.agent == worker_name for event in events)
+    assert sum("\nevent: run_end\n" in frame for frame in frames) == 1
+    assert "\nevent: run_end\n" in frames[-1]
+
+
+def test_run_manager_ignores_defensive_worker_run_lifecycle_events():
+    runtime = FakeRuntime()
+    manager = RunManager(runtime)
+    record = manager.start_run("s1", "question")
+    assert manager.wait_for_events(record.run_id, after_id=0, timeout=1)
+
+    runtime.bus.emit(EventType.RUN_START, {"run_id": record.run_id}, agent="worker-0")
+    runtime.bus.emit(EventType.RUN_END, {"run_id": record.run_id}, agent="worker-0")
+
+    assert all(
+        event.agent == "main"
+        for event in manager.events_after(record.run_id, 0)
+        if event.type in {"run_start", "run_end"}
+    )
+    assert record.run_end_emitted is False
+
+    runtime.release.set()
+    wait_for_thread(record)
+    assert record.run_end_emitted is True
 
 
 def test_cancel_requests_token_and_notifies_approval_gateway():

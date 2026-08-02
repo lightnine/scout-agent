@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from ..cancellation import RunCancelled
 from ..llm.base import ToolCall
 from ..llm.cache import stable_tool_schemas
 from .base import Tool, ToolContext, ToolResult
@@ -88,14 +89,23 @@ class ToolRegistry:
         全部只读时并行执行（调研场景收益很大：一次并发抓 5 个网页）；
         只要有一个带副作用，就退化为串行，避免难以复现的竞态。
         """
-        if len(calls) <= 1:
-            return [self.execute(c) for c in calls]
-
         all_safe = all(
             (t := self._tools.get(c.name)) is not None and t.concurrency_safe for c in calls
         )
-        if not all_safe:
-            return [self.execute(c) for c in calls]
+        if len(calls) <= 1 or not all_safe:
+            results: list[ToolResult] = []
+            for index, call in enumerate(calls):
+                try:
+                    results.append(self.execute(call))
+                except RunCancelled:
+                    if self.ctx.cancellation is not None:
+                        self.ctx.cancellation.request()
+                    results.extend(
+                        ToolResult.failure("运行已取消；工具未执行。")
+                        for _ in calls[index:]
+                    )
+                    break
+            return results
 
         with ThreadPoolExecutor(max_workers=min(self.max_workers, len(calls))) as pool:
             return list(pool.map(self.execute, calls))

@@ -91,6 +91,13 @@ describe('runReducer', () => {
     expect(state.status).toBe('idle')
   })
 
+  it('ignores a defensive worker run_end event', () => {
+    const running = runReducer(initialRunState, event('run_start', { input: 'question' }))
+    const workerEnd = { ...event('run_end', {}), agent: 'worker-0' }
+
+    expect(runReducer(running, workerEnd)).toBe(running)
+  })
+
   it('does not revert cancelling status on approval_resolved', () => {
     const cancelling = { ...initialRunState, status: 'cancelling' as const, runId: 'r1' }
     const next = runReducer(

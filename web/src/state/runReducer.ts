@@ -58,6 +58,9 @@ function applyToolEnd(
 export function runReducer(state: RunState, event: SSEEnvelope): RunState {
   switch (event.type) {
     case 'run_start':
+      if (event.agent !== 'main') {
+        return state
+      }
       return { ...initialRunState, status: 'running', runId: event.run_id }
     case 'llm_delta':
       if (state.status === 'idle') {
@@ -113,6 +116,9 @@ export function runReducer(state: RunState, event: SSEEnvelope): RunState {
     case 'error_dismissed':
       return { ...state, error: null }
     case 'run_end':
+      if (event.agent !== 'main') {
+        return state
+      }
       return { ...state, status: 'idle', runId: null, approval: null, cancellation: null }
     case 'session_changed':
       return initialRunState

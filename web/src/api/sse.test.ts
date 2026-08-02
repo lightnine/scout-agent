@@ -68,4 +68,21 @@ describe('subscribeToRun', () => {
 
     expect(factory).toHaveBeenCalledWith('/api/runs/run%2Fone/events?after_id=42')
   })
+
+  it('closes only for the lead run_end event', () => {
+    const source = sourceFixture()
+    const received = vi.fn()
+    subscribeToRun('r1', received, vi.fn(), { factory: () => source as never })
+
+    source.listeners.run_end({
+      data: JSON.stringify({ id: 4, type: 'run_end', agent: 'worker-0' }),
+    } as MessageEvent)
+    expect(source.close).not.toHaveBeenCalled()
+
+    source.listeners.run_end({
+      data: JSON.stringify({ id: 9, type: 'run_end', agent: 'main' }),
+    } as MessageEvent)
+    expect(source.close).toHaveBeenCalledOnce()
+    expect(received).toHaveBeenCalledTimes(2)
+  })
 })

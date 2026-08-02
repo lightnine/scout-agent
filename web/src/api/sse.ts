@@ -50,7 +50,7 @@ export function subscribeToRun(
     try {
       const event = JSON.parse((raw as MessageEvent<string>).data) as SSEEnvelope
       onEvent(event)
-      if (event.type === 'run_end') {
+      if (event.type === 'run_end' && event.agent === 'main') {
         close()
       }
     } catch {

@@ -101,7 +101,8 @@ class Agent:
             plan_confirmed=self.role != "lead" or self.approval_gateway is None
         )
         run_started_at = format_run_timestamp()
-        self._emit(EventType.RUN_START, {"run_id": run_id, "input": user_input})
+        if self.role == "lead":
+            self._emit(EventType.RUN_START, {"run_id": run_id, "input": user_input})
 
         if self.role == "lead":
             self.session.set_title_from(user_input)
@@ -173,7 +174,7 @@ class Agent:
             cancellation_messages = [
                 Message(
                     role="tool",
-                    content="运行已取消，工具调用未完成。",
+                    content="运行已取消，工具调用未执行。",
                     tool_call_id=call.id,
                     name=call.name,
                 )
@@ -194,17 +195,18 @@ class Agent:
             self.session.persist_state()
 
         result = AgentResult(final_text, step, usage, stop_reason, tool_call_count)
-        self._emit(
-            EventType.RUN_END,
-            {
-                "run_id": run_id,
-                "steps": step,
-                "stop_reason": stop_reason,
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-                "tool_calls": tool_call_count,
-            },
-        )
+        if self.role == "lead":
+            self._emit(
+                EventType.RUN_END,
+                {
+                    "run_id": run_id,
+                    "steps": step,
+                    "stop_reason": stop_reason,
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "tool_calls": tool_call_count,
+                },
+            )
         return result
 
     # ------------------------------------------------------------------ 各环节
