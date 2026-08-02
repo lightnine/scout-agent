@@ -80,6 +80,21 @@ def test_events_reject_non_decimal_last_event_id(settings, last_event_id):
     assert response.json()["detail"] == "Last-Event-ID 必须是非负十进制整数"
 
 
+@pytest.mark.parametrize("after_id", ["", " ", "+1", "-1", "1.0", "one", "9" * 5_000])
+def test_events_reject_invalid_manual_replay_cursor(settings, after_id):
+    with make_client(settings, raise_server_exceptions=False) as client:
+        session = client.post("/api/sessions", json={}).json()
+        run = client.post(f"/api/sessions/{session['id']}/runs", json={"question": "one"}).json()
+
+        response = client.get(
+            f"/api/runs/{run['run_id']}/events",
+            params={"after_id": after_id},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "after_id 必须是安全的非负十进制整数"
+
+
 def test_events_reject_oversized_decimal_last_event_id(settings):
     with make_client(settings, raise_server_exceptions=False) as client:
         session = client.post("/api/sessions", json={}).json()
@@ -182,6 +197,29 @@ def test_events_replay_sse_envelopes_and_include_streaming_headers(settings):
         replay_ids = [int(frame.splitlines()[0].removeprefix("id: ")) for frame in replay_frames]
         assert replay_ids == list(range(2, len(frames) + 1))
 
+        query_replay = client.get(
+            f"/api/runs/{run['run_id']}/events",
+            params={"after_id": "2"},
+        )
+        query_frames = [frame for frame in query_replay.text.strip().split("\n\n") if frame]
+        query_ids = [
+            int(frame.splitlines()[0].removeprefix("id: ")) for frame in query_frames
+        ]
+        assert query_ids == list(range(3, len(frames) + 1))
+
+        manual_replay = client.get(
+            f"/api/runs/{run['run_id']}/events",
+            params={"after_id": "1"},
+            headers={"Last-Event-ID": "2"},
+        )
+        manual_frames = [
+            frame for frame in manual_replay.text.strip().split("\n\n") if frame
+        ]
+        manual_ids = [
+            int(frame.splitlines()[0].removeprefix("id: ")) for frame in manual_frames
+        ]
+        assert manual_ids == list(range(3, len(frames) + 1))
+
 
 def test_stream_events_yields_heartbeat_then_stops_after_completion():
     record = SimpleNamespace(status="running")
@@ -270,10 +308,12 @@ def test_lifespan_closes_manager_then_runtime_once(settings, monkeypatch):
     class RecordingManager:
         def __init__(self, runtime, gateway):
             self.active = None
+            self.runtime = runtime
             calls.append(("manager_init", runtime, gateway))
 
         def shutdown(self):
             calls.append(("manager_shutdown",))
+            self.runtime.close()
 
     class RecordingRuntime:
         def __init__(self):
@@ -293,6 +333,54 @@ def test_lifespan_closes_manager_then_runtime_once(settings, monkeypatch):
         assert client.get("/api/health").status_code == 200
 
     assert [call[0] for call in calls] == ["manager_init", "manager_shutdown", "runtime_close"]
+
+
+def test_lifespan_returns_after_grace_and_defers_runtime_close(settings):
+    class SlowAgent:
+        def __init__(self, runtime):
+            self.runtime = runtime
+
+        def run(self, question, stream=True, run_id=None, **kwargs):
+            self.runtime.started.set()
+            self.runtime.release.wait()
+            assert self.runtime.closed.is_set() is False
+            self.runtime.order.append("run_finished")
+
+    class SlowRuntime:
+        def __init__(self):
+            self.bus = EventBus()
+            self.approval_gateway = None
+            self.approver = SimpleNamespace(gateway=None)
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.closed = threading.Event()
+            self.order = []
+
+        def resume_session(self, session_id):
+            return SimpleNamespace(id=session_id)
+
+        def build_agent(self, session, cancellation=None):
+            return SlowAgent(self)
+
+        def close(self):
+            self.order.append("runtime_closed")
+            self.closed.set()
+
+    runtime = SlowRuntime()
+    app = create_app(settings=settings, runtime=runtime)
+    started = time.monotonic()
+    with TestClient(app) as client:
+        client.app.state.run_manager._SHUTDOWN_GRACE_SECONDS = 0.01
+        client.app.state.run_manager.start_run("s1", "question")
+        assert runtime.started.wait(1)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert runtime.closed.is_set() is False
+
+    runtime.release.set()
+    assert runtime.closed.wait(1)
+    assert runtime.order == ["run_finished", "runtime_closed"]
 
 
 def test_scout_web_forwards_defaults_without_starting_server(monkeypatch, tmp_path):

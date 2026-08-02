@@ -56,6 +56,8 @@ class RunRecord:
     started_at: float = field(default_factory=time.time)
     buffer: deque[RunEnvelope] = field(default_factory=lambda: deque(maxlen=500))
     next_event_id: int = 1
+    error_emitted: bool = False
+    run_end_emitted: bool = False
     thread: threading.Thread | None = None
     condition: threading.Condition = field(default_factory=threading.Condition)
 
@@ -64,6 +66,7 @@ class RunManager:
     """Run one lead Agent at a time and retain its recent events for replay."""
 
     _MAX_RECORDS = 20
+    _SHUTDOWN_GRACE_SECONDS = 5.0
 
     def __init__(self, runtime: Any, approval_gateway: Any = None) -> None:
         self.runtime = runtime
@@ -72,6 +75,8 @@ class RunManager:
         self._active: RunRecord | None = None
         self._records: OrderedDict[str, RunRecord] = OrderedDict()
         self._shutting_down = False
+        self._runtime_close_claimed = False
+        self._cleanup_thread: threading.Thread | None = None
         runtime.bus.subscribe(self.on_event)
 
     def start_run(self, session_id: str, question: str) -> RunRecord:
@@ -109,17 +114,74 @@ class RunManager:
             self._records.popitem(last=False)
 
     def _run(self, record: RunRecord, question: str) -> None:
+        stage = "resume_session"
         try:
             session = self.runtime.resume_session(record.session_id)
+            stage = "build_agent"
             agent = self.runtime.build_agent(session, cancellation=record.cancellation)
+            stage = "agent_run"
             agent.run(question, stream=True, run_id=record.run_id)
+        except Exception as exc:
+            self._append_failure(record, stage, exc)
         finally:
+            cleanup = getattr(self.approval_gateway, "run_finished", None)
+            if cleanup is not None:
+                try:
+                    cleanup(record.run_id)
+                except Exception:
+                    pass
             with record.condition:
                 record.status = "finished"
                 record.condition.notify_all()
             with self._lock:
                 if self._active is record:
                     self._active = None
+
+    def _append_failure(self, record: RunRecord, stage: str, exc: Exception) -> None:
+        code = f"{stage}_failed"
+        exception_type = type(exc).__name__
+        if len(exception_type) > 80 or not exception_type.isidentifier():
+            exception_type = "Exception"
+        with record.condition:
+            if not record.error_emitted:
+                self._append_locked(
+                    record,
+                    EventType.ERROR.value,
+                    {"error": "run_failed", "code": code, "type": exception_type},
+                )
+            if not record.run_end_emitted:
+                self._append_locked(
+                    record,
+                    EventType.RUN_END.value,
+                    {"run_id": record.run_id, "stop_reason": "error", "code": code},
+                )
+            record.condition.notify_all()
+
+    @staticmethod
+    def _append_locked(
+        record: RunRecord,
+        event_type: str,
+        data: dict[str, Any],
+        *,
+        ts: float | None = None,
+        agent: str = "main",
+    ) -> None:
+        record.buffer.append(
+            RunEnvelope(
+                id=record.next_event_id,
+                type=event_type,
+                run_id=record.run_id,
+                session_id=record.session_id,
+                ts=time.time() if ts is None else ts,
+                agent=agent,
+                data=data,
+            )
+        )
+        record.next_event_id += 1
+        if event_type == EventType.ERROR.value:
+            record.error_emitted = True
+        elif event_type == EventType.RUN_END.value:
+            record.run_end_emitted = True
 
     def on_event(self, event: Event) -> None:
         with self._lock:
@@ -135,17 +197,13 @@ class RunManager:
                 and record.status not in ("cancelling", "finished")
             ):
                 record.status = "running"
-            envelope = RunEnvelope(
-                id=record.next_event_id,
-                type=event.type.value,
-                run_id=record.run_id,
-                session_id=record.session_id,
+            self._append_locked(
+                record,
+                event.type.value,
+                event.data,
                 ts=event.ts,
                 agent=event.agent,
-                data=event.data,
             )
-            record.next_event_id += 1
-            record.buffer.append(envelope)
             record.condition.notify_all()
 
     def events_after(self, run_id: str, after_id: int) -> list[RunEnvelope]:
@@ -181,8 +239,35 @@ class RunManager:
             active = self._active
         if active is not None:
             self.cancel(active.run_id)
-            if active.thread is not None:
-                active.thread.join(timeout=5)
+        thread = active.thread if active is not None else None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=self._SHUTDOWN_GRACE_SECONDS)
+        self._close_runtime_after(thread if thread is not None and thread.is_alive() else None)
+
+    def _close_runtime_after(self, thread: threading.Thread | None) -> None:
+        with self._lock:
+            if self._runtime_close_claimed:
+                return
+            self._runtime_close_claimed = True
+            if thread is not None:
+                self._cleanup_thread = threading.Thread(
+                    target=self._join_and_close_runtime,
+                    args=(thread,),
+                    name="scout-runtime-cleanup",
+                    daemon=True,
+                )
+                cleanup_thread = self._cleanup_thread
+            else:
+                cleanup_thread = None
+
+        if cleanup_thread is not None:
+            cleanup_thread.start()
+        else:
+            self.runtime.close()
+
+    def _join_and_close_runtime(self, run_thread: threading.Thread) -> None:
+        run_thread.join()
+        self.runtime.close()
 
     @property
     def active(self) -> RunRecord | None:

@@ -1,8 +1,11 @@
 import threading
+import time
 
 import pytest
 
+from scout.approval import ApprovalAction, ApprovalKind, ApprovalRequest
 from scout.core.events import EventBus, EventType
+from scout.web.gateway import WebApprovalGateway
 from scout.web.run_manager import (
     ActiveRunError,
     RunManager,
@@ -27,12 +30,18 @@ class FakeRuntime:
     def __init__(self):
         self.bus = EventBus()
         self.release = threading.Event()
+        self.close_calls = 0
+        self.closed = threading.Event()
 
     def resume_session(self, session_id):
         return type("Session", (), {"id": session_id})()
 
     def build_agent(self, session, cancellation=None):
         return BlockingAgent(self.bus, self.release)
+
+    def close(self):
+        self.close_calls += 1
+        self.closed.set()
 
 
 def wait_for_thread(record):
@@ -149,6 +158,7 @@ def test_shutdown_cancels_and_joins_the_active_run():
     assert record.status == "finished"
     assert record.thread is not None
     assert record.thread.is_alive() is False
+    assert runtime.close_calls == 1
 
 
 def test_shutdown_rejects_successor_after_active_run_completes():
@@ -193,6 +203,194 @@ def test_shutdown_rejects_successor_after_active_run_completes():
     gateway.release.set()
     shutdown_thread.join(1)
     assert shutdown_thread.is_alive() is False
+
+
+@pytest.mark.parametrize("failure_stage", ["resume_session", "build_agent", "agent_run"])
+def test_escaping_run_failures_append_sanitized_terminal_events(failure_stage):
+    secret = "api-key=do-not-expose"
+
+    class RaisingAgent:
+        def run(self, question, stream=True, run_id=None, **kwargs):
+            raise RuntimeError(secret)
+
+    class FailingRuntime(FakeRuntime):
+        def resume_session(self, session_id):
+            if failure_stage == "resume_session":
+                raise RuntimeError(secret)
+            return super().resume_session(session_id)
+
+        def build_agent(self, session, cancellation=None):
+            if failure_stage == "build_agent":
+                raise RuntimeError(secret)
+            return RaisingAgent()
+
+    runtime = FailingRuntime()
+    manager = RunManager(runtime)
+    record = manager.start_run("s1", "question")
+    wait_for_thread(record)
+
+    events = manager.events_after(record.run_id, 0)
+    assert [event.type for event in events] == ["error", "run_end"]
+    assert [event.id for event in events] == [1, 2]
+    assert all(event.run_id == record.run_id for event in events)
+    assert all(event.session_id == "s1" for event in events)
+    assert events[0].data == {
+        "error": "run_failed",
+        "code": f"{failure_stage}_failed",
+        "type": "RuntimeError",
+    }
+    assert events[1].data == {
+        "run_id": record.run_id,
+        "stop_reason": "error",
+        "code": f"{failure_stage}_failed",
+    }
+    assert secret not in repr([event.to_dict() for event in events])
+    assert manager.events_after(record.run_id, 0) == events
+
+
+def test_escaping_run_failure_does_not_duplicate_existing_terminal_events():
+    class TerminalThenRaisingAgent:
+        def __init__(self, bus):
+            self.bus = bus
+
+        def run(self, question, stream=True, run_id=None, **kwargs):
+            self.bus.emit(
+                EventType.ERROR,
+                {"error": "run_failed", "code": "agent_run_failed", "type": "RuntimeError"},
+            )
+            self.bus.emit(
+                EventType.RUN_END,
+                {"run_id": run_id, "stop_reason": "error", "code": "agent_run_failed"},
+            )
+            raise RuntimeError("secret")
+
+    class FailingRuntime(FakeRuntime):
+        def build_agent(self, session, cancellation=None):
+            return TerminalThenRaisingAgent(self.bus)
+
+    runtime = FailingRuntime()
+    manager = RunManager(runtime)
+    record = manager.start_run("s1", "question")
+    wait_for_thread(record)
+
+    event_types = [event.type for event in manager.events_after(record.run_id, 0)]
+    assert event_types.count("error") == 1
+    assert event_types.count("run_end") == 1
+
+
+def test_run_finished_cleanup_happens_after_last_possible_request():
+    class RecordingGateway:
+        def __init__(self):
+            self.finished = []
+
+        def run_finished(self, run_id):
+            self.finished.append(run_id)
+
+    runtime = FakeRuntime()
+    gateway = RecordingGateway()
+    manager = RunManager(runtime, approval_gateway=gateway)
+    record = manager.start_run("s1", "question")
+    assert manager.wait_for_events(record.run_id, after_id=0, timeout=1)
+    assert gateway.finished == []
+
+    runtime.release.set()
+    wait_for_thread(record)
+
+    assert gateway.finished == [record.run_id]
+
+
+def test_cancel_before_delayed_approval_registration_never_exposes_modal():
+    class DelayedApprovalAgent:
+        def __init__(self, runtime):
+            self.runtime = runtime
+
+        def run(self, question, stream=True, run_id=None, **kwargs):
+            self.runtime.ready.set()
+            self.runtime.release_approval.wait()
+            request = ApprovalRequest.create(
+                run_id,
+                "s1",
+                ApprovalKind.TOOL,
+                "Tool",
+                {},
+            )
+            self.runtime.decision = self.runtime.gateway.request(
+                request,
+                lambda kind, data: self.runtime.bus.emit(kind, data),
+            )
+
+    class DelayedApprovalRuntime(FakeRuntime):
+        def __init__(self, gateway):
+            super().__init__()
+            self.gateway = gateway
+            self.ready = threading.Event()
+            self.release_approval = threading.Event()
+            self.decision = None
+
+        def build_agent(self, session, cancellation=None):
+            return DelayedApprovalAgent(self)
+
+    gateway = WebApprovalGateway()
+    runtime = DelayedApprovalRuntime(gateway)
+    manager = RunManager(runtime, approval_gateway=gateway)
+    record = manager.start_run("s1", "question")
+    assert runtime.ready.wait(1)
+
+    assert manager.cancel(record.run_id) == "cancelling"
+    runtime.release_approval.set()
+    wait_for_thread(record)
+
+    assert runtime.decision.action is ApprovalAction.CANCEL
+    assert "approval_required" not in [
+        event.type for event in manager.events_after(record.run_id, 0)
+    ]
+
+
+def test_slow_shutdown_defers_runtime_close_until_run_thread_finishes():
+    class SlowAgent:
+        def __init__(self, runtime):
+            self.runtime = runtime
+
+        def run(self, question, stream=True, run_id=None, **kwargs):
+            self.runtime.bus.emit(EventType.RUN_START, {"run_id": run_id, "input": question})
+            self.runtime.release.wait()
+            assert self.runtime.closed.is_set() is False
+            self.runtime.order.append("run_finished")
+            self.runtime.bus.emit(EventType.RUN_END, {"run_id": run_id, "stop_reason": "cancelled"})
+
+    class SlowRuntime(FakeRuntime):
+        def __init__(self):
+            super().__init__()
+            self.order = []
+
+        def build_agent(self, session, cancellation=None):
+            return SlowAgent(self)
+
+        def close(self):
+            self.order.append("runtime_closed")
+            super().close()
+
+    runtime = SlowRuntime()
+    manager = RunManager(runtime)
+    manager._SHUTDOWN_GRACE_SECONDS = 0.01
+    record = manager.start_run("s1", "question")
+    assert manager.wait_for_events(record.run_id, after_id=0, timeout=1)
+
+    started = time.monotonic()
+    manager.shutdown()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert record.thread is not None and record.thread.is_alive()
+    assert runtime.close_calls == 0
+
+    runtime.release.set()
+    assert runtime.closed.wait(1)
+    wait_for_thread(record)
+    manager.shutdown()
+
+    assert runtime.order == ["run_finished", "runtime_closed"]
+    assert runtime.close_calls == 1
 
 
 def test_failed_thread_start_rolls_back_reservation(monkeypatch):

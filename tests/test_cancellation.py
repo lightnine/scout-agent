@@ -1,9 +1,11 @@
 import pytest
 from conftest import FakeLLM, assistant_tool_call
 
+from scout.approval import ApprovalAction, ApprovalDecision
 from scout.cancellation import RunCancellation, RunCancelled
 from scout.core.events import EventType
-from scout.llm.base import Message
+from scout.llm.base import Message, ToolCall
+from scout.permissions import PolicyApprover
 from scout.runtime import Runtime
 
 
@@ -74,3 +76,61 @@ def test_cancellation_after_tool_prevents_next_llm_step(settings):
 
     assert result.stop_reason == "cancelled"
     assert len(llm.received) == 1
+
+
+def test_cancellation_during_serial_batch_persists_complete_tool_protocol(settings):
+    class CancellingGateway:
+        def __init__(self):
+            self.decisions = [
+                ApprovalDecision(ApprovalAction.APPROVE),
+                ApprovalDecision(ApprovalAction.CANCEL),
+            ]
+
+        def request(self, request, emit=None):
+            return self.decisions.pop(0)
+
+    assistant = Message(
+        role="assistant",
+        tool_calls=[
+            ToolCall(id="write-1", name="write_file", arguments={"path": "one.txt", "content": "1"}),
+            ToolCall(id="write-2", name="write_file", arguments={"path": "two.txt", "content": "2"}),
+        ],
+    )
+    llm = FakeLLM([assistant, Message(role="assistant", content="must not run")])
+    runtime = Runtime(
+        settings,
+        llm=llm,
+        approver=PolicyApprover("ask", gateway=CancellingGateway()),
+        enable_trace=False,
+    )
+    session = runtime.new_session()
+    agent = runtime.build_agent(session)
+    agent.approval_gateway = None
+
+    try:
+        result = agent.run("write both", stream=False)
+        stored = runtime.store.load_messages(session.id)
+        resumed = runtime.resume_session(session.id)
+    finally:
+        runtime.close()
+
+    assistant_calls = [
+        call["id"]
+        for message in stored
+        if message["role"] == "assistant"
+        for call in message["tool_calls"]
+    ]
+    tool_results = [
+        message["tool_call_id"] for message in stored if message["role"] == "tool"
+    ]
+    assert result.stop_reason == "cancelled"
+    assert len(llm.received) == 1
+    assert assistant_calls == ["write-1", "write-2"]
+    assert tool_results == assistant_calls
+    assert all(
+        "取消" in message["content"] for message in stored if message["role"] == "tool"
+    )
+    assert [message.tool_call_id for message in resumed.working.messages if message.role == "tool"] == [
+        "write-1",
+        "write-2",
+    ]

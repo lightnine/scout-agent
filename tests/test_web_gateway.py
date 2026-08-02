@@ -51,6 +51,38 @@ def test_cancel_run_unblocks_pending_request():
     assert result["value"].action is ApprovalAction.CANCEL
 
 
+def test_cancel_before_request_returns_cancel_without_exposing_approval():
+    gateway = WebApprovalGateway()
+    request = ApprovalRequest.create("r1", "s1", ApprovalKind.TOOL, "Tool", {})
+    events = []
+
+    gateway.cancel_run("r1")
+    decision = gateway.request(request, emit=lambda kind, data: events.append((kind, data)))
+
+    assert decision.action is ApprovalAction.CANCEL
+    assert gateway.pending_for_run("r1") == []
+    assert events == []
+
+
+def test_finished_run_cleanup_removes_cancelled_tombstone():
+    gateway = WebApprovalGateway()
+    first = ApprovalRequest.create("r1", "s1", ApprovalKind.TOOL, "Tool", {})
+    gateway.cancel_run("r1")
+    assert gateway.request(first).action is ApprovalAction.CANCEL
+    gateway.run_finished("r1")
+
+    second = ApprovalRequest.create("r1", "s1", ApprovalKind.TOOL, "Tool", {})
+    result = {}
+    thread = threading.Thread(target=lambda: result.setdefault("value", gateway.request(second)))
+    thread.start()
+    wait_for_pending(gateway, "r1")
+    gateway.resolve(second.id, ApprovalDecision(ApprovalAction.APPROVE))
+    thread.join(1)
+
+    assert thread.is_alive() is False
+    assert result["value"].action is ApprovalAction.APPROVE
+
+
 def test_request_emits_required_before_waiting_and_resolved_after_decision():
     gateway = WebApprovalGateway()
     request = ApprovalRequest.create("r1", "s1", ApprovalKind.PLAN, "Plan", {})

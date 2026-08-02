@@ -247,6 +247,129 @@ describe('useWorkbench', () => {
     expect(result.current.session?.id).toBe('s1')
   })
 
+  it('reconnects from the highest cursor and ignores retained duplicate events', async () => {
+    apiMock.session.mockResolvedValue(session('s1'))
+    apiMock.startRun.mockResolvedValue({ run_id: 'r1', session_id: 's1' })
+    const listeners: Array<(event: SSEEnvelope) => void> = []
+    subscribeMock.mockImplementation(
+      (
+        _runId: string,
+        onEvent: (event: SSEEnvelope) => void,
+      ) => {
+        listeners.push(onEvent)
+        return vi.fn()
+      },
+    )
+    const { result } = renderHook(() => useWorkbench())
+
+    await act(async () => {
+      await result.current.selectSession('s1')
+      await result.current.start('question')
+    })
+    await waitFor(() => expect(listeners).toHaveLength(1))
+
+    act(() => {
+      listeners[0]({
+        id: 5,
+        type: 'llm_delta',
+        run_id: 'r1',
+        session_id: 's1',
+        ts: 1,
+        agent: 'main',
+        data: { text: 'first' },
+      })
+      listeners[0]({
+        id: 6,
+        type: 'tool_start',
+        run_id: 'r1',
+        session_id: 's1',
+        ts: 2,
+        agent: 'main',
+        data: { id: 'tool-1', tool: 'search' },
+      })
+    })
+    act(() => result.current.reconnect())
+    await waitFor(() => expect(listeners).toHaveLength(2))
+
+    expect(subscribeMock.mock.calls[1][3]).toEqual({ afterId: 6 })
+    act(() => {
+      listeners[1]({
+        id: 5,
+        type: 'llm_delta',
+        run_id: 'r1',
+        session_id: 's1',
+        ts: 1,
+        agent: 'main',
+        data: { text: 'first' },
+      })
+      listeners[1]({
+        id: 6,
+        type: 'tool_start',
+        run_id: 'r1',
+        session_id: 's1',
+        ts: 2,
+        agent: 'main',
+        data: { id: 'tool-1', tool: 'search' },
+      })
+      listeners[1]({
+        id: 7,
+        type: 'llm_delta',
+        run_id: 'r1',
+        session_id: 's1',
+        ts: 3,
+        agent: 'main',
+        data: { text: ' second' },
+      })
+    })
+
+    expect(result.current.run.streamingText).toBe('first second')
+    expect(result.current.run.tools).toHaveLength(1)
+  })
+
+  it('resets the replay cursor when the run identity changes', async () => {
+    apiMock.session.mockResolvedValue(session('s1'))
+    apiMock.startRun
+      .mockResolvedValueOnce({ run_id: 'r1', session_id: 's1' })
+      .mockResolvedValueOnce({ run_id: 'r2', session_id: 's1' })
+    const listeners: Array<(event: SSEEnvelope) => void> = []
+    subscribeMock.mockImplementation(
+      (
+        _runId: string,
+        onEvent: (event: SSEEnvelope) => void,
+      ) => {
+        listeners.push(onEvent)
+        return vi.fn()
+      },
+    )
+    const { result } = renderHook(() => useWorkbench())
+
+    await act(async () => {
+      await result.current.selectSession('s1')
+      await result.current.start('first')
+    })
+    await waitFor(() => expect(listeners).toHaveLength(1))
+    act(() => {
+      listeners[0]({
+        id: 9,
+        type: 'run_end',
+        run_id: 'r1',
+        session_id: 's1',
+        ts: 1,
+        agent: 'main',
+        data: {},
+      })
+    })
+    await waitFor(() => expect(result.current.run.status).toBe('idle'))
+
+    await act(async () => {
+      await result.current.start('second')
+    })
+    await waitFor(() => expect(listeners).toHaveLength(2))
+
+    expect(subscribeMock.mock.calls[1][0]).toBe('r2')
+    expect(subscribeMock.mock.calls[1][3]).toEqual({ afterId: 0 })
+  })
+
   it('keeps a later selection while a pending create starts and completes its own run', async () => {
     const created = deferred<SessionSummary>()
     const createdDetail = deferred<SessionDetail>()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..approval import ApprovalDecision
@@ -21,6 +21,29 @@ from .schemas import (
     SessionSummary,
 )
 from .sse import stream_events
+
+_MAX_REPLAY_CURSOR = 2**63 - 1
+
+
+def _parse_replay_cursor(value: str | None, label: str) -> int:
+    if value is None:
+        return 0
+    detail = (
+        "Last-Event-ID 必须是非负十进制整数"
+        if label == "Last-Event-ID"
+        else f"{label} 必须是安全的非负十进制整数"
+    )
+    if (
+        not value
+        or len(value) > 19
+        or not value.isascii()
+        or not value.isdecimal()
+    ):
+        raise HTTPException(400, detail)
+    cursor = int(value)
+    if cursor > _MAX_REPLAY_CURSOR:
+        raise HTTPException(400, detail)
+    return cursor
 
 
 def build_router() -> APIRouter:
@@ -76,6 +99,7 @@ def build_router() -> APIRouter:
         run_id: str,
         request: Request,
         last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+        after_id: Annotated[str | None, Query()] = None,
     ) -> StreamingResponse:
         manager = request.app.state.run_manager
         try:
@@ -83,18 +107,12 @@ def build_router() -> APIRouter:
         except RunNotFoundError as exc:
             raise HTTPException(404, f"找不到运行 {run_id}") from exc
 
-        if last_event_id is None:
-            after_id = 0
-        elif last_event_id.isascii() and last_event_id.isdecimal():
-            try:
-                after_id = int(last_event_id)
-            except ValueError as exc:
-                raise HTTPException(400, "Last-Event-ID 必须是非负十进制整数") from exc
-        else:
-            raise HTTPException(400, "Last-Event-ID 必须是非负十进制整数")
+        header_cursor = _parse_replay_cursor(last_event_id, "Last-Event-ID")
+        query_cursor = _parse_replay_cursor(after_id, "after_id")
+        replay_cursor = max(header_cursor, query_cursor)
 
         return StreamingResponse(
-            stream_events(manager, run_id, after_id),
+            stream_events(manager, run_id, replay_cursor),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

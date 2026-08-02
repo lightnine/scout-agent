@@ -40,6 +40,7 @@ export function useWorkbench() {
   const selectionPendingRef = useRef(false)
   const activeRunRef = useRef<ActiveRun | null>(null)
   const subscribedRunIdRef = useRef<string | null>(null)
+  const eventCursorRef = useRef<{ runId: string; id: number } | null>(null)
   const previousStatusRef = useRef(run.status)
 
   const applySession = useCallback((next: SessionDetail | null) => {
@@ -74,6 +75,7 @@ export function useWorkbench() {
       return
     }
     activeRunRef.current = next
+    eventCursorRef.current = { runId: next.runId, id: 0 }
     setActiveRun(next)
     dispatch(runStartEvent(next.runId, next.sessionId, input))
   }, [])
@@ -209,9 +211,19 @@ export function useWorkbench() {
     const close = subscribeToRun(
       runId,
       (event) => {
-        if (activeRunRef.current?.runId === runId && event.run_id === runId) {
-          dispatch(event)
+        if (activeRunRef.current?.runId !== runId || event.run_id !== runId) {
+          return
         }
+        const cursor = eventCursorRef.current
+        if (
+          cursor?.runId !== runId ||
+          !Number.isSafeInteger(event.id) ||
+          event.id <= cursor.id
+        ) {
+          return
+        }
+        cursor.id = event.id
+        dispatch(event)
       },
       () => {
         if (activeRunRef.current?.runId === runId) {
@@ -225,6 +237,9 @@ export function useWorkbench() {
             data: { error: '事件流连接已关闭' },
           })
         }
+      },
+      {
+        afterId: eventCursorRef.current?.runId === runId ? eventCursorRef.current.id : 0,
       },
     )
     return () => {

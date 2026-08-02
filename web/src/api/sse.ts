@@ -19,13 +19,24 @@ const EVENT_TYPES = [
   'error',
 ]
 
+interface SubscribeOptions {
+  afterId?: number
+  factory?: (url: string) => EventSource
+}
+
 export function subscribeToRun(
   runId: string,
   onEvent: (event: SSEEnvelope) => void,
   onError: (error: Event) => void,
-  factory: (url: string) => EventSource = (url) => new EventSource(url),
+  options: SubscribeOptions = {},
 ): () => void {
-  const source = factory(`/api/runs/${encodeURIComponent(runId)}/events`)
+  const afterId = options.afterId ?? 0
+  if (!Number.isSafeInteger(afterId) || afterId < 0) {
+    throw new RangeError('afterId must be a safe non-negative integer')
+  }
+  const factory = options.factory ?? ((url: string) => new EventSource(url))
+  const baseUrl = `/api/runs/${encodeURIComponent(runId)}/events`
+  const source = factory(afterId > 0 ? `${baseUrl}?after_id=${afterId}` : baseUrl)
   let closed = false
 
   const close = () => {

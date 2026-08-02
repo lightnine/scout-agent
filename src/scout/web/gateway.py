@@ -31,6 +31,7 @@ class WebApprovalGateway:
         self._lock = threading.RLock()
         self._pending: dict[str, _Pending] = {}
         self._resolved: set[str] = set()
+        self._cancelled_runs: set[str] = set()
 
     def request(
         self,
@@ -39,6 +40,9 @@ class WebApprovalGateway:
     ) -> ApprovalDecision:
         item = _Pending(request)
         with self._lock:
+            if request.run_id in self._cancelled_runs:
+                self._resolved.add(request.id)
+                return ApprovalDecision(ApprovalAction.CANCEL)
             self._pending[request.id] = item
 
         if emit is not None:
@@ -78,6 +82,7 @@ class WebApprovalGateway:
 
     def cancel_run(self, run_id: str) -> None:
         with self._lock:
+            self._cancelled_runs.add(run_id)
             items = [
                 item
                 for item in self._pending.values()
@@ -87,6 +92,11 @@ class WebApprovalGateway:
                 item.resolved = True
                 item.decision = ApprovalDecision(ApprovalAction.CANCEL)
                 item.event.set()
+
+    def run_finished(self, run_id: str) -> None:
+        """Forget cancellation state after the run can no longer request approval."""
+        with self._lock:
+            self._cancelled_runs.discard(run_id)
 
     def pending_for_run(self, run_id: str) -> list[ApprovalRequest]:
         with self._lock:

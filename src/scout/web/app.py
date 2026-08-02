@@ -82,7 +82,6 @@ def create_app(settings: Settings | None = None, runtime: Runtime | None = None)
         finally:
             if not closed:
                 manager.shutdown()
-                runtime.close()
                 closed = True
 
     app = FastAPI(title="Scout", lifespan=lifespan)

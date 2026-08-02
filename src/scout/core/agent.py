@@ -39,7 +39,7 @@ class AgentResult:
     text: str
     steps: int
     usage: Usage = field(default_factory=Usage)
-    stop_reason: str = "completed"  # completed | max_steps | error
+    stop_reason: str = "completed"  # completed | max_steps | error | cancelled
     tool_calls: int = 0
 
 
@@ -117,6 +117,7 @@ class Agent:
         tool_call_count = 0
         signatures: list[str] = []
         step = 0
+        outstanding_tool_calls: list[ToolCall] = []
 
         try:
             for step in range(1, self.max_steps + 1):
@@ -159,14 +160,27 @@ class Agent:
                     break
 
                 tool_call_count += len(assistant.tool_calls)
+                outstanding_tool_calls = assistant.tool_calls
                 self.cancellation.ensure_active()
                 tool_messages = self._run_tools(assistant.tool_calls, signatures, run_id, state)
                 self.working.extend(tool_messages)
                 pending.extend(tool_messages)
+                outstanding_tool_calls = []
             else:
                 stop_reason = "max_steps"
                 final_text = "已达到步数上限，未能得出最终结论。"
         except RunCancelled:
+            cancellation_messages = [
+                Message(
+                    role="tool",
+                    content="运行已取消，工具调用未完成。",
+                    tool_call_id=call.id,
+                    name=call.name,
+                )
+                for call in outstanding_tool_calls
+            ]
+            self.working.extend(cancellation_messages)
+            pending.extend(cancellation_messages)
             stop_reason = "cancelled"
             final_text = "运行已取消。"
         except Exception as exc:
