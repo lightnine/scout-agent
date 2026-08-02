@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SessionDetail } from '../api/types'
+import type { SSEEnvelope, SessionDetail, SessionSummary } from '../api/types'
 
 const apiMock = vi.hoisted(() => ({
   sessions: vi.fn(),
@@ -30,6 +30,18 @@ function session(id: string): SessionDetail {
     active_run_id: null,
     run_status: 'idle',
   }
+}
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => undefined
+  const promise = new Promise<T>((next) => {
+    resolve = next
+  })
+  return { promise, resolve }
+}
+
+function summary(id: string): SessionSummary {
+  return { id, title: id, message_count: 0, created_at: 0, updated_at: 0 }
 }
 
 describe('useWorkbench', () => {
@@ -100,5 +112,64 @@ describe('useWorkbench', () => {
     await waitFor(() => expect(subscribeMock).toHaveBeenCalledTimes(2))
     expect(close).toHaveBeenCalled()
     expect(result.current.session?.id).toBe('s1')
+  })
+
+  it('keeps a later selection while a pending create starts and completes its own run', async () => {
+    const created = deferred<SessionSummary>()
+    const createdDetail = deferred<SessionDetail>()
+    const listeners = new Map<string, (event: SSEEnvelope) => void>()
+    apiMock.createSession.mockReturnValue(created.promise)
+    apiMock.session.mockImplementation((id: string) =>
+      id === 'created' ? createdDetail.promise : Promise.resolve(session(id)),
+    )
+    apiMock.startRun.mockResolvedValue({ run_id: 'r-created', session_id: 'created' })
+    subscribeMock.mockImplementation(
+      (runId: string, onEvent: (event: SSEEnvelope) => void) => {
+        listeners.set(runId, onEvent)
+        return vi.fn()
+      },
+    )
+    const { result } = renderHook(() => useWorkbench())
+    let starting: Promise<void> = Promise.resolve()
+
+    act(() => {
+      starting = result.current.start('question')
+    })
+    await waitFor(() => expect(apiMock.createSession).toHaveBeenCalledOnce())
+
+    await act(async () => {
+      await result.current.selectSession('existing')
+    })
+    expect(result.current.session?.id).toBe('existing')
+
+    await act(async () => {
+      created.resolve(summary('created'))
+    })
+    await waitFor(() => expect(apiMock.session).toHaveBeenCalledWith('created'))
+    await act(async () => {
+      createdDetail.resolve(session('created'))
+      await starting
+    })
+
+    expect(apiMock.startRun).toHaveBeenCalledWith('created', 'question')
+    expect(result.current.session?.id).toBe('existing')
+    await waitFor(() => expect(listeners.get('r-created')).toBeDefined())
+
+    act(() => {
+      listeners.get('r-created')?.({
+        id: 1,
+        type: 'run_end',
+        run_id: 'r-created',
+        session_id: 'created',
+        ts: 0,
+        agent: 'main',
+        data: {},
+      })
+    })
+
+    await waitFor(() =>
+      expect(apiMock.session.mock.calls.filter(([id]) => id === 'created')).toHaveLength(2),
+    )
+    expect(result.current.session?.id).toBe('existing')
   })
 })

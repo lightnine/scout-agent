@@ -153,7 +153,7 @@ export function useWorkbench() {
       activeRunRef.current = null
       setActiveRun(null)
       void refreshSessions().catch(() => undefined)
-      if (completedRun && selectedSessionIdRef.current === completedRun.sessionId) {
+      if (completedRun) {
         void refreshSession(completedRun.sessionId).catch(() => undefined)
       }
     }
@@ -163,12 +163,23 @@ export function useWorkbench() {
   const createSession = useCallback(
     async (title = '') => {
       setError(null)
+      const selectionAtStart = selectedSessionIdRef.current
+      const selectionRequestAtStart = selectionRequestRef.current
       try {
         const created = await api.createSession(title)
-        selectedSessionIdRef.current = created.id
-        const requestId = ++selectionRequestRef.current
+        const shouldSelectCreated =
+          selectionRequestRef.current === selectionRequestAtStart &&
+          selectedSessionIdRef.current === selectionAtStart
+        if (shouldSelectCreated) {
+          selectedSessionIdRef.current = created.id
+        }
+        const requestId = shouldSelectCreated ? ++selectionRequestRef.current : selectionRequestRef.current
         const detail = await api.session(created.id)
-        if (requestId === selectionRequestRef.current && selectedSessionIdRef.current === created.id) {
+        if (
+          shouldSelectCreated &&
+          requestId === selectionRequestRef.current &&
+          selectedSessionIdRef.current === created.id
+        ) {
           applySession(detail)
         }
         void refreshSessions().catch(() => undefined)
