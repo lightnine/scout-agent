@@ -83,12 +83,12 @@ def build_router() -> APIRouter:
         except RunNotFoundError as exc:
             raise HTTPException(404, f"找不到运行 {run_id}") from exc
 
-        try:
-            after_id = int(last_event_id or 0)
-            if after_id < 0:
-                raise ValueError
-        except ValueError as exc:
-            raise HTTPException(400, "Last-Event-ID 必须是非负整数") from exc
+        if last_event_id is None:
+            after_id = 0
+        elif last_event_id.isascii() and last_event_id.isdecimal():
+            after_id = int(last_event_id)
+        else:
+            raise HTTPException(400, "Last-Event-ID 必须是非负十进制整数")
 
         return StreamingResponse(
             stream_events(manager, run_id, after_id),

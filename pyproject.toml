@@ -36,6 +36,11 @@ packages = ["src/scout"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+filterwarnings = [
+    # FastAPI 0.141.1 re-exports Starlette's TestClient, whose fallback import
+    # of httpx emits this warning. It is not triggered by Scout code.
+    'ignore:Using `httpx` with `starlette\.testclient` is deprecated; install `httpx2` instead\.:starlette.exceptions.StarletteDeprecationWarning:fastapi\.testclient',
+]
 
 [tool.ruff]
 line-length = 100
