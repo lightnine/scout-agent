@@ -15,9 +15,12 @@ from scout.web.sse import stream_events
 from scout.web_cli import main
 
 
-def make_client(settings, script=None, llm=None):
+def make_client(settings, script=None, llm=None, raise_server_exceptions=True):
     runtime = Runtime(settings, llm=llm or FakeLLM(script), enable_trace=False)
-    return TestClient(create_app(settings=settings, runtime=runtime))
+    return TestClient(
+        create_app(settings=settings, runtime=runtime),
+        raise_server_exceptions=raise_server_exceptions,
+    )
 
 
 def test_health_and_session_creation(settings):
@@ -45,6 +48,20 @@ def test_events_reject_non_decimal_last_event_id(settings, last_event_id):
         response = client.get(
             f"/api/runs/{run['run_id']}/events",
             headers={"Last-Event-ID": last_event_id},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Last-Event-ID 必须是非负十进制整数"
+
+
+def test_events_reject_oversized_decimal_last_event_id(settings):
+    with make_client(settings, raise_server_exceptions=False) as client:
+        session = client.post("/api/sessions", json={}).json()
+        run = client.post(f"/api/sessions/{session['id']}/runs", json={"question": "one"}).json()
+
+        response = client.get(
+            f"/api/runs/{run['run_id']}/events",
+            headers={"Last-Event-ID": "9" * 5_000},
         )
 
     assert response.status_code == 400

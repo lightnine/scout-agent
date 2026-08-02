@@ -86,7 +86,10 @@ def build_router() -> APIRouter:
         if last_event_id is None:
             after_id = 0
         elif last_event_id.isascii() and last_event_id.isdecimal():
-            after_id = int(last_event_id)
+            try:
+                after_id = int(last_event_id)
+            except ValueError as exc:
+                raise HTTPException(400, "Last-Event-ID 必须是非负十进制整数") from exc
         else:
             raise HTTPException(400, "Last-Event-ID 必须是非负十进制整数")
 
