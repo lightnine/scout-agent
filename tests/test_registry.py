@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 from typing import Annotated
 
+from scout.approval import ApprovalAction, ApprovalDecision
 from scout.llm.base import ToolCall
 from scout.permissions import PolicyApprover
 from scout.tools.base import Risk, ToolContext, tool
 from scout.tools.registry import MAX_RESULT_CHARS, ToolRegistry
+
+
+class FixedGateway:
+    def __init__(self, decision):
+        self.decision = decision
+        self.requests = []
+
+    def request(self, request, emit=None):
+        self.requests.append(request)
+        return self.decision
 
 
 @tool(risk=Risk.SAFE)
@@ -51,12 +63,15 @@ def test_readonly_mode_blocks_side_effects(tmp_path):
 
 
 def test_user_rejection_is_surfaced_to_model(tmp_path):
-    approver = PolicyApprover("ask", prompt=lambda tool, args: False)
-    result = make_registry(tmp_path, approver).execute(
-        ToolCall(id="1", name="mutate", arguments={"value": "a"})
-    )
+    gateway = FixedGateway(ApprovalDecision(ApprovalAction.REJECT, "not now"))
+    approver = PolicyApprover("ask", gateway=gateway)
+    ctx = ToolContext(workspace=tmp_path, session=SimpleNamespace(id="s1"))
+    ctx.run_id = "r1"
+    registry = ToolRegistry(ctx, approver=approver)
+    registry.register_all([slow_echo, mutate, huge])
+    result = registry.execute(ToolCall(id="1", name="mutate", arguments={"value": "a"}))
     assert result.ok is False
-    assert "用户拒绝执行 mutate" in result.content
+    assert "not now" in result.content
 
 
 def test_readonly_calls_run_in_parallel(tmp_path):

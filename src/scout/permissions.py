@@ -6,10 +6,17 @@ Agent 真正的风险不是"想错了"，而是"想错了还真去执行"。
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .approval import (
+    ApprovalAction,
+    ApprovalGateway,
+    ApprovalKind,
+    ApprovalRequest,
+    Emitter,
+)
+from .cancellation import RunCancelled
 from .tools.base import Risk, Tool
 
 
@@ -20,7 +27,14 @@ class Decision:
 
 
 class Approver(Protocol):
-    def check(self, tool: Tool, args: dict[str, Any]) -> Decision: ...
+    def check(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        *,
+        session_id: str,
+        run_id: str,
+    ) -> Decision: ...
 
 
 class PolicyApprover:
@@ -34,24 +48,48 @@ class PolicyApprover:
     def __init__(
         self,
         mode: str = "ask",
-        prompt: Callable[[Tool, dict[str, Any]], bool] | None = None,
+        gateway: ApprovalGateway | None = None,
+        emit: Emitter | None = None,
     ) -> None:
         self.mode = mode
-        self.prompt = prompt
-        self._always_allow: set[str] = set()
+        self.gateway = gateway
+        self.emit = emit
+        self._session_allow: dict[str, set[str]] = {}
 
-    def check(self, tool: Tool, args: dict[str, Any]) -> Decision:
+    def check(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        *,
+        session_id: str,
+        run_id: str,
+    ) -> Decision:
         if tool.risk == Risk.SAFE:
             return Decision(True)
         if self.mode == "readonly":
             return Decision(False, f"当前是只读模式，{tool.name} 会产生副作用，已拒绝")
-        if self.mode == "auto" or tool.name in self._always_allow:
+        if self.mode == "auto" or tool.name in self._session_allow.get(session_id, set()):
             return Decision(True)
-        if self.prompt is None:  # 非交互环境（如单测）默认放行
-            return Decision(True)
-        if self.prompt(tool, args):
-            return Decision(True)
-        return Decision(False, f"用户拒绝执行 {tool.name}，请换一种方式或询问用户")
+        if self.gateway is None:
+            return Decision(False, f"当前无交互审批通道，拒绝执行 {tool.name}")
 
-    def always_allow(self, tool_name: str) -> None:
-        self._always_allow.add(tool_name)
+        request = ApprovalRequest.create(
+            run_id,
+            session_id,
+            ApprovalKind.TOOL,
+            f"执行工具 {tool.name}",
+            {"tool": tool.name, "arguments": args, "risk": int(tool.risk)},
+        )
+        decision = self.gateway.request(request, self.emit)
+        if decision.action is ApprovalAction.CANCEL:
+            raise RunCancelled("用户取消运行")
+        if decision.action is ApprovalAction.ALLOW_SESSION:
+            self._session_allow.setdefault(session_id, set()).add(tool.name)
+            return Decision(True)
+        if decision.action is ApprovalAction.APPROVE:
+            return Decision(True)
+        reason = decision.feedback or f"用户拒绝执行 {tool.name}，请换一种方式或询问用户"
+        return Decision(False, reason)
+
+    def clear_session(self, session_id: str) -> None:
+        self._session_allow.pop(session_id, None)
