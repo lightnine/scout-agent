@@ -1,8 +1,9 @@
-from conftest import FakeLLM, assistant_tool_call
+from conftest import FakeLLM
 
 from scout.llm.base import Message, Usage
 from scout.runtime import Runtime
-from scout.tools.plan import Plan
+from scout.tools.base import ToolContext
+from scout.tools.plan import Plan, update_plan
 
 
 def test_session_restores_plan_and_usage(settings, fake_llm):
@@ -24,15 +25,13 @@ def test_session_restores_plan_and_usage(settings, fake_llm):
 
 
 def test_update_plan_persists_immediately_on_resume(settings):
-    llm = FakeLLM(
-        [
-            assistant_tool_call("update_plan", {"steps": ["step1", "step2"], "current": 1}),
-            Message(role="assistant", content="done"),
-        ]
-    )
-    runtime = Runtime(settings, llm=llm, enable_trace=False)
+    runtime = Runtime(settings, llm=FakeLLM(), enable_trace=False)
     session = runtime.new_session()
-    runtime.build_agent(session).run("make a plan", stream=False)
+    ctx = ToolContext(workspace=settings.workspace, settings=settings, session=session)
+
+    result = update_plan.run(ctx, steps=["step1", "step2"], current=1)
+    assert result.ok
+
     session_id = session.id
     runtime.close()
 
