@@ -210,7 +210,8 @@ def test_cancelled_plan_stops_the_run(settings):
             Message(
                 role="assistant",
                 tool_calls=[
-                    ToolCall("p1", "update_plan", {"steps": ["inspect"], "current": 1})
+                    ToolCall("p1", "update_plan", {"steps": ["inspect"], "current": 1}),
+                    ToolCall("f1", "list_dir", {"path": "."}),
                 ],
             )
         ]
@@ -219,8 +220,16 @@ def test_cancelled_plan_stops_the_run(settings):
     session = runtime.new_session()
     try:
         result = runtime.build_agent(session).run("research", stream=False)
+        stored = runtime.store.load_messages(session.id)
     finally:
         runtime.close()
 
+    tool_messages = [message for message in stored if message["role"] == "tool"]
     assert result.stop_reason == "cancelled"
     assert result.text == "运行已取消。"
+    assert len(llm.received) == 1
+    assert [message["tool_call_id"] for message in tool_messages] == ["p1", "f1"]
+    assert tool_messages[0]["content"].startswith("计划已更新：")
+    assert "未执行" not in tool_messages[0]["content"]
+    assert "计划尚未确认" in tool_messages[1]["content"]
+    assert "未执行" in tool_messages[1]["content"]

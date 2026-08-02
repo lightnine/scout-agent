@@ -309,7 +309,9 @@ class Agent:
             allowed_ids = {call.id for call in plan_calls}
             for call in runnable:
                 if call.id not in allowed_ids:
-                    deferred[call.id] = "计划尚未确认，请在确认后重新调用该工具。"
+                    deferred[call.id] = (
+                        "计划尚未确认，工具未执行；请在确认后重新调用该工具。"
+                    )
             runnable = plan_calls
         elif state.plan_submitted and requires_plan_confirmation:
             deferred = {
@@ -341,7 +343,7 @@ class Agent:
             if decision.action is ApprovalAction.APPROVE:
                 state.plan_confirmed = True
             elif decision.action is ApprovalAction.CANCEL:
-                raise RunCancelled("用户取消运行")
+                self.cancellation.request()
             else:
                 feedback = decision.feedback or "请重新制定计划"
                 plan_feedback = f"[计划未确认] 用户修改意见：{feedback}\n请重拟计划并再次提交。"
