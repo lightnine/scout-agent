@@ -76,6 +76,8 @@ export function runReducer(state: RunState, event: SSEEnvelope): RunState {
         return state.approval ? { ...state, approval: null } : state
       }
       return { ...state, status: 'running', approval: null }
+    case 'cancel_requested':
+      return state.runId ? { ...state, status: 'cancelling', approval: null } : state
     case 'error':
       if (state.status === 'idle') {
         return state

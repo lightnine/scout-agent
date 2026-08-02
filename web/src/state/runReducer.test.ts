@@ -91,6 +91,14 @@ describe('runReducer', () => {
     expect(next.status).toBe('cancelling')
   })
 
+  it('enters cancelling state before the cancel request resolves', () => {
+    const running = runReducer(initialRunState, event('run_start', { input: 'question' }))
+    const next = runReducer(running, event('cancel_requested', {}))
+
+    expect(next.status).toBe('cancelling')
+    expect(next.runId).toBe('r1')
+  })
+
   it('ignores error events when already idle', () => {
     const idle = { ...initialRunState, status: 'idle' as const }
     const next = runReducer(idle, event('error', { error: 'late failure' }))
