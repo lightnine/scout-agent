@@ -1,0 +1,51 @@
+"""CLI 审批兼容：ask 模式仍能通过 gateway 放行/拒绝 risky 工具。"""
+
+from __future__ import annotations
+
+from scout.cli import make_approver
+from scout.permissions import PolicyApprover
+from scout.tools.base import Risk, tool
+
+
+@tool(risk=Risk.CAUTION)
+def risky(value: str) -> str:
+    """测试用 risky 工具。"""
+    return value
+
+
+class FakeConsole:
+    def __init__(self, answers: list[str]) -> None:
+        self.answers = list(answers)
+        self.printed: list[str] = []
+
+    def print(self, *args, **kwargs) -> None:
+        self.printed.append(" ".join(str(a) for a in args))
+
+    def input(self, prompt: str) -> str:
+        return self.answers.pop(0)
+
+
+def test_cli_approver_uses_gateway_not_prompt_callback():
+    console = FakeConsole(["y"])
+    approver = make_approver(console, "ask")
+    assert isinstance(approver, PolicyApprover)
+    assert callable(getattr(approver.gateway, "request", None))
+
+    decision = approver.check(risky, {"value": "x"}, session_id="s1", run_id="r1")
+    assert decision.allowed is True
+
+
+def test_cli_approver_rejects_on_no():
+    console = FakeConsole(["n"])
+    approver = make_approver(console, "ask")
+    decision = approver.check(risky, {"value": "x"}, session_id="s1", run_id="r1")
+    assert decision.allowed is False
+
+
+def test_cli_approver_allow_session_skips_second_prompt():
+    console = FakeConsole(["a"])
+    approver = make_approver(console, "ask")
+    first = approver.check(risky, {"value": "a"}, session_id="s1", run_id="r1")
+    second = approver.check(risky, {"value": "b"}, session_id="s1", run_id="r2")
+    assert first.allowed and second.allowed
+    assert len(console.answers) == 0

@@ -8,7 +8,10 @@ from __future__ import annotations
 import pytest
 from conftest import FakeLLM, assistant_tool_call
 
+from scout.approval import ApprovalAction, ApprovalDecision
+from scout.core.events import EventType
 from scout.llm.base import Message
+from scout.permissions import PolicyApprover
 from scout.runtime import Runtime
 
 
@@ -217,3 +220,45 @@ def test_streaming_deltas_are_emitted(runtime_factory):
 
     agent.run("你好", stream=True)
     assert "".join(seen) == "流式回答"
+
+
+def test_agent_run_propagates_run_id_to_approval_requests(settings):
+    captured: list = []
+    run_start_ids: list[str] = []
+
+    class CaptureGateway:
+        def request(self, request, emit=None):
+            captured.append(request)
+            return ApprovalDecision(ApprovalAction.APPROVE)
+
+    settings.permission_mode = "ask"
+    llm = FakeLLM(
+        [
+            assistant_tool_call("write_file", {"path": "out.txt", "content": "hi"}),
+            Message(role="assistant", content="写好了。"),
+        ]
+    )
+    runtime = Runtime(
+        settings,
+        llm=llm,
+        approver=PolicyApprover("ask", gateway=CaptureGateway()),
+        enable_trace=False,
+    )
+    runtime.bus.subscribe(
+        lambda e: run_start_ids.append(e.data["run_id"])
+        if e.type is EventType.RUN_START
+        else None
+    )
+    try:
+        session = runtime.new_session()
+        agent = runtime.build_agent(session)
+        agent.run("写个文件", stream=False)
+    finally:
+        runtime.close()
+
+    assert len(run_start_ids) == 1
+    assert len(captured) == 1
+    assert captured[0].run_id
+    assert captured[0].session_id == session.id
+    assert captured[0].run_id == run_start_ids[0]
+    assert agent.registry.ctx.run_id == run_start_ids[0]

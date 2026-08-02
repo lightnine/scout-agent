@@ -16,6 +16,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
+from .approval import ApprovalAction, ApprovalDecision
 from .config import load_settings
 from .core.events import Event, EventBus, EventType
 from .permissions import PolicyApprover
@@ -117,24 +118,35 @@ class Renderer:
 
 
 def make_approver(console: Console, mode: str) -> PolicyApprover:
-    def prompt(tool: Tool, args: dict[str, Any]) -> bool:
-        console.print()
-        console.print(
-            Panel(
-                f"[bold]{tool.name}[/bold]  风险等级：{_risk_label(tool.risk)}\n\n"
-                f"{_escape(_format_args(args, limit=200))}",
-                title="需要你确认",
-                border_style="yellow",
+    class _CliGateway:
+        def request(self, request, emit=None):
+            tool = Tool(
+                name=request.payload["tool"],
+                description="",
+                parameters={},
+                fn=lambda: None,
+                risk=Risk(request.payload["risk"]),
             )
-        )
-        answer = console.input("[yellow]执行吗？(y=同意 / n=拒绝 / a=本会话都同意) [/yellow]").strip().lower()
-        if answer == "a":
-            approver.always_allow(tool.name)
-            return True
-        return answer in ("y", "yes", "")
+            args = request.payload["arguments"]
+            console.print()
+            console.print(
+                Panel(
+                    f"[bold]{tool.name}[/bold]  风险等级：{_risk_label(tool.risk)}\n\n"
+                    f"{_escape(_format_args(args, limit=200))}",
+                    title="需要你确认",
+                    border_style="yellow",
+                )
+            )
+            answer = console.input(
+                "[yellow]执行吗？(y=同意 / n=拒绝 / a=本会话都同意) [/yellow]"
+            ).strip().lower()
+            if answer == "a":
+                return ApprovalDecision(ApprovalAction.ALLOW_SESSION)
+            if answer in ("y", "yes", ""):
+                return ApprovalDecision(ApprovalAction.APPROVE)
+            return ApprovalDecision(ApprovalAction.REJECT)
 
-    approver = PolicyApprover(mode, prompt)
-    return approver
+    return PolicyApprover(mode, gateway=_CliGateway())
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -65,8 +65,7 @@ def test_readonly_mode_blocks_side_effects(tmp_path):
 def test_user_rejection_is_surfaced_to_model(tmp_path):
     gateway = FixedGateway(ApprovalDecision(ApprovalAction.REJECT, "not now"))
     approver = PolicyApprover("ask", gateway=gateway)
-    ctx = ToolContext(workspace=tmp_path, session=SimpleNamespace(id="s1"))
-    ctx.run_id = "r1"
+    ctx = ToolContext(workspace=tmp_path, session=SimpleNamespace(id="s1"), run_id="r1")
     registry = ToolRegistry(ctx, approver=approver)
     registry.register_all([slow_echo, mutate, huge])
     result = registry.execute(ToolCall(id="1", name="mutate", arguments={"value": "a"}))

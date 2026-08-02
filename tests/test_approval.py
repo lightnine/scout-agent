@@ -1,9 +1,12 @@
+import pytest
+
 from scout.approval import (
     ApprovalAction,
     ApprovalDecision,
     ApprovalKind,
     ApprovalRequest,
 )
+from scout.cancellation import RunCancelled
 from scout.permissions import PolicyApprover
 from scout.tools.base import Risk, tool
 
@@ -60,6 +63,10 @@ def test_safe_policy_paths_and_session_scoped_allow():
     assert first.allowed and second.allowed and other.allowed
     assert len(gateway.requests) == 2
     assert gateway.requests[0].kind is ApprovalKind.TOOL
+    assert gateway.requests[0].session_id == "s1"
+    assert gateway.requests[0].run_id == "r1"
+    assert gateway.requests[1].session_id == "s2"
+    assert gateway.requests[1].run_id == "r3"
 
 
 def test_reject_is_returned_to_model():
@@ -69,3 +76,11 @@ def test_reject_is_returned_to_model():
     )
     assert decision.allowed is False
     assert "not now" in decision.reason
+
+
+def test_cancel_raises_run_cancelled():
+    gateway = FixedGateway(ApprovalDecision(ApprovalAction.CANCEL))
+    with pytest.raises(RunCancelled, match="用户取消运行"):
+        PolicyApprover("ask", gateway=gateway).check(
+            risky, {"value": "a"}, session_id="s1", run_id="r1"
+        )

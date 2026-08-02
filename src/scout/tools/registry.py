@@ -67,12 +67,11 @@ class ToolRegistry:
 
         if self.approver is not None:
             session_id = getattr(self.ctx.session, "id", "")
-            run_id = getattr(self.ctx, "run_id", "")
             decision = self.approver.check(
                 tool,
                 call.arguments,
                 session_id=session_id,
-                run_id=run_id,
+                run_id=self.ctx.run_id,
             )
             if not decision.allowed:
                 return ToolResult.failure(decision.reason or "该操作未获批准")

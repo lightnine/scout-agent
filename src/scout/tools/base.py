@@ -66,6 +66,7 @@ class ToolContext:
     session: Any = None  # 当前会话（计划、来源编号都挂在上面）
     spawn: Any = None  # Callable：派生子 Agent，由 Agent 注入
     emit: Any = None  # Callable：向事件总线发事件
+    run_id: str = ""
 
     def resolve(self, path: str) -> Path:
         """把工具传入的路径解析成绝对路径，并禁止逃出工作区。

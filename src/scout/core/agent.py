@@ -74,6 +74,7 @@ class Agent:
     # ------------------------------------------------------------------ 主循环
     def run(self, user_input: str, stream: bool = True) -> AgentResult:
         run_id = uuid.uuid4().hex[:8]
+        self.registry.ctx.run_id = run_id
         run_started_at = format_run_timestamp()
         self._emit(EventType.RUN_START, {"run_id": run_id, "input": user_input})
 
