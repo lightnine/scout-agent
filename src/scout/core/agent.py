@@ -345,6 +345,7 @@ class Agent:
                 self._emit(
                     EventType.TOOL_END,
                     {
+                        "id": call.id,
                         "tool": call.name,
                         "ok": ok,
                         "display": display,

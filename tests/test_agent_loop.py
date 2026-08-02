@@ -135,6 +135,30 @@ def test_parallel_tool_calls_all_get_responses(runtime_factory):
     assert tool_ids == {"x1", "x2"}, "每个 tool_call 都必须有对应的结果消息"
 
 
+def test_tool_end_events_include_call_id_for_concurrent_same_name_tools(runtime_factory):
+    from scout.llm.base import ToolCall
+
+    multi = Message(
+        role="assistant",
+        tool_calls=[
+            ToolCall(id="a1", name="list_dir", arguments={"path": "."}),
+            ToolCall(id="a2", name="list_dir", arguments={"path": "docs"}),
+        ],
+    )
+    runtime, _, _, agent = runtime_factory([multi, Message(role="assistant", content="done")])
+    tool_ends: list[dict] = []
+    runtime.bus.subscribe(
+        lambda event: tool_ends.append(dict(event.data))
+        if event.type is EventType.TOOL_END
+        else None
+    )
+    agent.run("list both dirs", stream=False)
+
+    assert len(tool_ends) == 2
+    assert {event["id"] for event in tool_ends} == {"a1", "a2"}
+    assert all(event["tool"] == "list_dir" for event in tool_ends)
+
+
 def test_long_term_memory_is_injected_into_runtime_reminder(runtime_factory):
     runtime, llm, _, agent = runtime_factory([Message(role="assistant", content="好的。")])
     runtime.memory.save("用户在做数据平台，关注 Agent 落地", tags="画像")

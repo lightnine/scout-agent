@@ -27,17 +27,27 @@ export const initialRunState: RunState = {
   error: null,
 }
 
-function matchesRunningToolEnd(
-  tool: Record<string, unknown>,
+function applyToolEnd(
+  tools: Array<Record<string, unknown>>,
   data: Record<string, unknown>,
-): boolean {
-  if (tool.status !== 'running') {
-    return false
+): Array<Record<string, unknown>> {
+  const endId = data.id
+  if (endId != null) {
+    return tools.map((tool) =>
+      tool.status === 'running' && tool.id === endId
+        ? { ...tool, ...data, status: 'finished' }
+        : tool,
+    )
   }
-  if (data.id != null) {
-    return tool.id === data.id
-  }
-  return tool.tool === data.tool
+
+  let matched = false
+  return tools.map((tool) => {
+    if (!matched && tool.status === 'running' && tool.tool === data.tool) {
+      matched = true
+      return { ...tool, ...data, status: 'finished' }
+    }
+    return tool
+  })
 }
 
 export function runReducer(state: RunState, event: SSEEnvelope): RunState {
@@ -54,14 +64,7 @@ export function runReducer(state: RunState, event: SSEEnvelope): RunState {
     case 'tool_start':
       return { ...state, tools: [...state.tools, { ...event.data, status: 'running' }] }
     case 'tool_end':
-      return {
-        ...state,
-        tools: state.tools.map((tool) =>
-          matchesRunningToolEnd(tool, event.data)
-            ? { ...tool, ...event.data, status: 'finished' }
-            : tool,
-        ),
-      }
+      return { ...state, tools: applyToolEnd(state.tools, event.data) }
     case 'approval_required':
       return {
         ...state,
