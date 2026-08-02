@@ -36,7 +36,7 @@ class Plan:
         return bool(self.steps) and self.current > len(self.steps)
 
 
-@tool(risk=Risk.SAFE)
+@tool(risk=Risk.SAFE, concurrency_safe=False)
 def update_plan(
     ctx: ToolContext,
     steps: Annotated[list[str], "完整的调研步骤列表，每次都传全量（可以增删改）"],

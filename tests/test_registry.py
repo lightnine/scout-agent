@@ -8,9 +8,12 @@ from types import SimpleNamespace
 from typing import Annotated
 
 from scout.approval import ApprovalAction, ApprovalDecision
+from scout.core.session import Session
 from scout.llm.base import ToolCall
+from scout.memory.store import Store
 from scout.permissions import PolicyApprover
 from scout.tools.base import Risk, ToolContext, tool
+from scout.tools.plan import PLAN_TOOLS
 from scout.tools.registry import MAX_RESULT_CHARS, ToolRegistry
 
 
@@ -112,3 +115,36 @@ def test_cached_schemas_sorted_and_memoized(tmp_path):
     second = registry.cached_schemas()
     assert first is second
     assert [s["function"]["name"] for s in first] == ["huge", "mutate", "slow_echo"]
+
+
+def test_update_plan_is_safe_but_not_concurrency_safe():
+    update_plan = next(t for t in PLAN_TOOLS if t.name == "update_plan")
+    assert update_plan.risk is Risk.SAFE
+    assert update_plan.concurrency_safe is False
+
+
+def test_update_plan_batch_executes_serially(settings):
+    store = Store(settings.db_path)
+    session = Session.create(store, llm=None)
+    ctx = ToolContext(workspace=settings.workspace, session=session)
+    registry = ToolRegistry(ctx)
+    registry.register_all(PLAN_TOOLS)
+    registry.register(slow_echo)
+
+    calls = [
+        ToolCall(id="1", name="slow_echo", arguments={"text": "a"}),
+        ToolCall(id="2", name="slow_echo", arguments={"text": "b"}),
+        ToolCall(id="3", name="update_plan", arguments={"steps": ["first"], "current": 1}),
+        ToolCall(id="4", name="update_plan", arguments={"steps": ["final"], "current": 1}),
+    ]
+    started = time.monotonic()
+    results = registry.execute_batch(calls)
+    elapsed = time.monotonic() - started
+    row = store.get_session(session.id)
+    store.close()
+
+    slow_threads = [int(r.content.split("@")[1]) for r in results[:2]]
+    assert all(r.ok for r in results)
+    assert slow_threads[0] == slow_threads[1], "batch containing update_plan must run serially"
+    assert elapsed >= 0.15, "serial batch should take at least two slow_echo sleeps"
+    assert row["meta"]["plan"]["steps"] == ["final"]
