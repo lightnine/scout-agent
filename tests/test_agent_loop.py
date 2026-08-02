@@ -181,6 +181,44 @@ def test_subagent_runs_in_isolated_context(runtime_factory):
     assert "Milvus 适合十亿级检索" in tool_message.content
 
 
+def test_spawned_worker_has_no_approval_gateway(settings):
+    worker_gateways: list = []
+    original_init = Agent.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if kwargs.get("role") == "worker":
+            worker_gateways.append(self.approval_gateway)
+
+    class CaptureGateway:
+        def request(self, request, emit=None):
+            return ApprovalDecision(ApprovalAction.APPROVE)
+
+    settings.permission_mode = "ask"
+    llm = FakeLLM(
+        [
+            assistant_tool_call("research_subtopic", {"topic": "worker gateway check"}),
+            Message(role="assistant", content="worker done"),
+            Message(role="assistant", content="lead done"),
+        ]
+    )
+    gateway = CaptureGateway()
+    runtime = Runtime(settings, llm=llm, approval_gateway=gateway, enable_trace=False)
+    try:
+        session = runtime.new_session()
+        agent = runtime.build_agent(session)
+        assert agent.role == "lead"
+        assert agent.approval_gateway is gateway
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(Agent, "__init__", tracking_init)
+            agent.run("spawn a worker", stream=False)
+    finally:
+        runtime.close()
+
+    assert worker_gateways == [None]
+
+
 def test_subagent_quota_is_enforced(settings, runtime_factory):
     settings.max_subagents = 0
     _, llm, _, agent = runtime_factory(

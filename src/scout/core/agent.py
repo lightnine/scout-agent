@@ -386,7 +386,7 @@ class Agent:
                 max_steps=self.settings.subagent_max_steps,
                 model=self.settings.worker_model(),
                 persist=False,
-                approval_gateway=self.approval_gateway,
+                approval_gateway=None,
                 cancellation=self.cancellation,
             )
             result = worker.run(
