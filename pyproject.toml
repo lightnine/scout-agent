@@ -17,9 +17,14 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
+web = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.1",
+]
 
 [project.scripts]
 scout = "scout.cli:main"
+scout-web = "scout.web_cli:main"
 
 [build-system]
 requires = ["hatchling"]

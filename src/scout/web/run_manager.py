@@ -149,12 +149,12 @@ class RunManager:
             record.condition.notify_all()
 
     def events_after(self, run_id: str, after_id: int) -> list[RunEnvelope]:
-        record = self._get_record(run_id)
+        record = self.get(run_id)
         with record.condition:
             return [event for event in record.buffer if event.id > after_id]
 
     def wait_for_events(self, run_id: str, after_id: int, timeout: float = 15) -> bool:
-        record = self._get_record(run_id)
+        record = self.get(run_id)
         with record.condition:
             return record.condition.wait_for(
                 lambda: any(event.id > after_id for event in record.buffer)
@@ -163,7 +163,7 @@ class RunManager:
             )
 
     def cancel(self, run_id: str) -> str:
-        record = self._get_record(run_id)
+        record = self.get(run_id)
         with record.condition:
             if record.status == "finished":
                 return "already_finished"
@@ -184,7 +184,14 @@ class RunManager:
             if active.thread is not None:
                 active.thread.join(timeout=5)
 
-    def _get_record(self, run_id: str) -> RunRecord:
+    @property
+    def active(self) -> RunRecord | None:
+        """Return the current lead run, if any."""
+        with self._lock:
+            return self._active
+
+    def get(self, run_id: str) -> RunRecord:
+        """Return a retained run record or raise when it is unknown."""
         with self._lock:
             record = self._records.get(run_id)
         if record is None:
