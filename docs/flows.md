@@ -271,6 +271,24 @@ flowchart TB
     TOOLS -.->|独立字段| API
 ```
 
+#### 举例（Step 5 快照）
+
+用户问「Qdrant vs Milvus」，已执行搜索并抓取 `[S1][S2]` 后，第 5 步 messages 从上到下：
+
+```
+tools ── web_search / fetch_url / … 的 JSON Schema（独立字段，🟢不变）
+
+① system 🟢     你是 Scout… + 工作区 + 步数上限 + 工具名列表
+② user         Qdrant 和 Milvus 的架构与适用场景对比
+③ assistant    tool_calls: update_plan
+④ tool         计划已更新…
+⑤ assistant    tool_calls: web_search, fetch_url×2
+⑥ tool ×3      搜索结果 / [S1]预览 / [S2]预览
+⑦ user 🟡      【当前运行时状态】计划 · [S1][S2] 来源清单 · 请继续
+```
+
+🟢 利于 prefix cache　🟡 每步更新。完整图见 `design.md` §7.2。
+
 #### static system（`build_static_system_prompt`）
 
 | 块 | 来源 | 是否变化 |

@@ -262,7 +262,62 @@ graph TB
 | runtime reminder | `build_runtime_reminder()` | **是**（每步） | 否，仅当次请求 |
 | FORCE_FINAL | `FORCE_FINAL` 常量 | 仅最后一步 | 否 |
 
-### 7.3 static system 里有什么
+#### 举例：Step 5 发给 LLM 的完整上下文
+
+假设用户问「Qdrant 和 Milvus 的架构与适用场景对比」，主 Agent 已执行 4 步（定计划、搜索、抓了 2 个网页）。**第 5 步**调 LLM 时，请求体从上到下长这样：
+
+```mermaid
+flowchart TB
+    subgraph TOOLS_FIELD["tools 字段（API 独立参数，不在 messages 里）"]
+        T1["web_search · fetch_url · search_evidence · …<br/>13 个工具的 JSON Schema<br/>cached_schemas() 排序后 memoize<br/>🟢 整轮 run 不变"]
+    end
+
+    subgraph MSG["messages 数组（从上到下）"]
+        direction TB
+        M1["① role: system 🟢<br/>━━━━━━━━━━━━━━━━<br/>你是 Scout，严谨的调研助手…<br/>工作流程 / 引用规范 / 输出风格<br/>运行环境：工作区、搜索后端、步数上限 30<br/>可用工具：web_search, fetch_url, …"]
+        M2["② role: user<br/>━━━━━━━━━━━━━━━━<br/>Qdrant 和 Milvus 的架构与适用场景对比"]
+        M3["③ role: assistant<br/>━━━━━━━━━━━━━━━━<br/>tool_calls: update_plan(steps=…)"]
+        M4["④ role: tool<br/>━━━━━━━━━━━━━━━━<br/>计划已更新：1.搜资料 2.抓正文 …"]
+        M5["⑤ role: assistant<br/>━━━━━━━━━━━━━━━━<br/>tool_calls: web_search, fetch_url×2"]
+        M6["⑥ role: tool × 3<br/>━━━━━━━━━━━━━━━━<br/>搜索结果 / [S1]预览 / [S2]预览"]
+        M7["⑦ role: user 🟡<br/>━━━━━━━━━━━━━━━━<br/>【当前运行时状态】<br/>任务开始时间 · 子Agent 0/3<br/>长期记忆 Top-5 · 计划 [x][>]<br/>已收录 [S1][S2] · 请继续任务"]
+    end
+
+    TOOLS_FIELD --> API["POST /chat/completions"]
+    M1 --> M2 --> M3 --> M4 --> M5 --> M6 --> M7
+    M7 --> API
+
+    style M1 fill:#e8f5e9
+    style T1 fill:#e8f5e9
+    style M7 fill:#fff8e1
+```
+
+图例：🟢 **整轮不变**（利于 prefix cache）　🟡 **每步更新**（放末尾，少 invalidate 前缀）
+
+**各块实际内容对照：**
+
+| 序号 | role | 来源 | 示例内容（缩写） |
+| --- | --- | --- | --- |
+| tools | — | `registry.cached_schemas()` | `[{name: web_search, parameters:…}, {name: fetch_url,…}, …]` |
+| ① | system | `build_static_system_prompt()` | 「你是 Scout…」+ 工作区 `/code` + Tavily + 上限 30 步 |
+| ② | user | `working.memory[0]` | 用户原始问题（pinned，压缩也不删） |
+| ③④ | assistant → tool | working memory | `update_plan` 调用链 |
+| ⑤⑥ | assistant → tool×N | working memory | 搜索 + 并行抓取，tool 返回含 `[S1]` 预览 |
+| ⑦ | user | `build_runtime_reminder()` | 计划进度、`[S1] Milvus 文档`、`[S2] Qdrant 文档` |
+
+**不在 messages 里的东西：**
+
+- 网页全文 → SQLite `evidence` 表（`fetch_url` 入库），上下文里只有预览
+- 子 Agent 的中间过程 → 只有最终结论以 `tool` 消息回到主上下文（见 §8.2）
+
+**最后一步（step = max_steps）额外追加：**
+
+```
+⑧ role: user  「已达到步数上限，不能再调工具，请立刻收尾…」  ← FORCE_FINAL
+   且 tools=None（不再提供工具列表）
+```
+
+**prefix cache 视角：** Step 5 相比 Step 4，①～⑥ 的前缀不变（只多了 ⑤⑥ 若 Step 4 刚执行完则 ①～④ 相同），只有 ⑦ 的 reminder 文案变了。Step 2+ 的 `cached_tokens` 应 > 0。
 
 `build_static_system_prompt()` = `LEAD_SYSTEM` + 固定运行环境（`_static_runtime_block`）：
 
@@ -282,24 +337,44 @@ LEAD_SYSTEM（prompts.py 写死）
 
 子调研员（`role=worker`）用 `build_worker_static_prompt()`，只含 `WORKER_SYSTEM`，不含计划/来源/长期记忆。
 
-### 7.4 runtime reminder 里有什么
+### 7.4 runtime reminder 是干什么的
 
-volatile 状态放在 messages **末尾** 的一条 `role=user` 消息里，以 `【当前运行时状态】` 开头（`RUNTIME_REMINDER_MARKER`）：
+`build_runtime_reminder()` 在**每步调 LLM 前**生成一条 `role=user` 消息，追加在 messages **最末尾**。作用是：把「会变的状态」集中塞给模型，又**不污染** static system 和 working memory。
+
+**它组织的信息（主调研员）：**
+
+| 块 | 函数/来源 | 每步是否变 | 作用 |
+| --- | --- | --- | --- |
+| 标记行 | `【当前运行时状态】` | 否 | 让模型识别这是状态快照，不是用户新提问 |
+| 任务开始时间 | `run_started_at`，`run()` 入口取一次 | **否**（整轮相同） | 给模型时间锚点，不是实时钟 |
+| 子 Agent 配额 | `session.subagents_used / max_subagents` | **是**（派子 Agent 后变） | 告诉模型还能派几个 |
+| 长期记忆 | `run()` 入口 `_recall()` Top-5 | **否**（整轮相同） | 跨会话用户偏好/结论 |
+| 调研计划 | `session.plan.render()` | **是**（`update_plan` 后变） | 当前进度 [x]/[>]/[ ] |
+| 已收录来源 | `session.evidence.sources()` | **是**（`fetch_url` 后变） | `[S1]` 清单，写报告前核对 |
+| 收尾句 | 「请基于以上最新状态继续任务。」 | 否 | 提示模型按最新状态继续 |
+
+子调研员用更短的 `build_worker_runtime_reminder()`（只有开始时间 + 搜索后端）。
+
+**reminder 不写入 working memory**——不 persist、不参与压缩，下一步会重新生成一条新的。
+
+#### 任务开始时间会影响 prefix cache 吗？
+
+**不会（在同一次 `run()` 内）。** 时间在 `run()` 开始时只取一次：
+
+```python
+run_started_at = format_run_timestamp()  # 仅一次
+# 之后每步 _assemble(..., run_started_at=run_started_at) 传入同一个字符串
+```
+
+所以 Step 2、Step 5 的 reminder 里「任务开始时间」字段**字节级相同**。它**不是**以前那种每步 `time.strftime()` 刷新的「当前时间」——那种写法如果放在 system 里，确实每步 invalidate cache；这正是 refactor 时把它改成 **run 级固定时间戳** 并放进**末尾 reminder** 的原因。
+
+**真正让 reminder 每步变的是：** 子 Agent 配额、计划、来源清单。但因为 reminder 在 messages **最后**，prefix cache 保护的是它**前面**的 `[system][user][assistant/tool…]`。reminder 本身变了，只影响末尾 suffix 的 token 重算，不会 invalidate 前面的大段前缀。
 
 ```
-build_runtime_reminder()  ← 主调研员
-├── 运行环境（实时）：任务开始时间、子 Agent 配额
-├── 长期记忆：run() 开始时 _recall() 一次，整轮复用
-├── 当前调研计划：session.plan.render()
-├── 已收录来源：session.evidence.sources()（最多 20 个）
-└── 「请基于以上最新状态继续任务。」
-
-build_worker_runtime_reminder()  ← 子调研员（更短）
-├── 任务开始时间
-└── 搜索后端
+Step 4:  [system][历史…][reminder_v4]     ← 前缀到 reminder 前
+Step 5:  [system][历史…+新tool][reminder_v5]
+          └──── cache 可命中 ────┘  └─ 仅这块重算 ─┘
 ```
-
-**长期记忆**在 `run()` 入口 `_recall(user_input)` 召回 Top-5，之后 13 步共用同一份，不会每步重新检索。
 
 ### 7.5 设计取舍
 
@@ -453,19 +528,111 @@ sequenceDiagram
 
 ## 9. 可观测性
 
-Agent 出问题时最难受的是"不知道它当时在想什么"。
+这里的“可观测性”不是读取模型的隐藏思维，而是记录 Agent 的**行为轨迹和运行指标**，从而回答：
 
-设计上，**Agent 内部不 print，只发事件**。CLI 订阅事件渲染成彩色输出，TraceRecorder 订阅同一份事件流落成 JSONL。将来接 Web 前端就多一个订阅者推 SSE，Agent 代码一行不用改。
+- 当前执行到哪一步？
+- 调用了哪些 LLM 和工具，成功还是失败？
+- 哪一步耗时最长、消耗了多少 token？
+- 是否命中 prefix cache、是否发生上下文压缩？
+- 子 Agent 何时启动、何时结束？
+
+### 9.1 EventBus：Agent 只报告事实
+
+设计上，**Agent 内部不直接 `print`，只向 `EventBus` 发送结构化事件**：
+
+```mermaid
+flowchart LR
+    A["Agent / Tool / Worker"] -->|"emit(Event)"| B["EventBus"]
+    B --> C["Renderer<br/>终端实时展示"]
+    B --> D["TraceRecorder<br/>写入 JSONL"]
+    B -.未来扩展.-> E["Web / SSE"]
+    B -.未来扩展.-> F["Prometheus / OpenTelemetry"]
+```
+
+每个 `Event` 包含四项：
+
+| 字段 | 含义 | 示例 |
+| --- | --- | --- |
+| `type` | 发生了什么 | `llm_end`、`tool_start` |
+| `data` | 事件携带的数据 | step、token、耗时、工具参数 |
+| `ts` | 发生时间 | Unix timestamp |
+| `agent` | 事件来自哪个 Agent | `main`、`worker-1` |
+
+典型运行会产生如下事件流：
+
+```text
+run_start
+├── step_start
+├── llm_start
+├── llm_end                 # token、延迟、cached_tokens
+├── tool_start: web_search
+├── tool_end: web_search    # 成功/失败、耗时
+├── subagent_start: worker-1
+│   ├── llm_start
+│   ├── llm_end
+│   ├── tool_start: fetch_url
+│   └── tool_end: fetch_url
+├── subagent_end: worker-1
+└── run_end
+```
+
+`EventBus.emit()` 会把同一个事件依次交给所有订阅者。某个订阅者异常会被隔离，不能拖垮 Agent Loop。当前 EventBus 是**进程内、同步广播**，不是分布式消息队列。
+
+### 9.2 两个订阅者
+
+**Renderer：实时回答“现在运行到哪了”**
+
+CLI 的 `Renderer` 把事件转换成适合人看的终端输出：
+
+```text
+⚙ web_search(query=SQLite limits)
+✓ web_search 完成（826ms）
+🚀 派出子调研员 worker-1
+(worker-1) ⚙ fetch_url(...)
+🏁 worker-1 完成（5 步，8120 tokens）
+📦 上下文压缩：42000 → 15000 tokens
+```
+
+**TraceRecorder：事后回答“当时发生了什么”**
+
+`TraceRecorder` 把同一批事件写入 `.scout/traces.jsonl`，一行一个 JSON 对象：
+
+```json
+{"ts":1785632801.2,"agent":"main","type":"llm_start","step":1,"messages":3}
+{"ts":1785632804.8,"agent":"main","type":"llm_end","step":1,"prompt_tokens":2430,"cached_tokens":1820,"latency_ms":3600}
+{"ts":1785632804.9,"agent":"main","type":"tool_start","tool":"web_search","arguments":{"query":"SQLite limits"}}
+{"ts":1785632805.7,"agent":"main","type":"tool_end","tool":"web_search","ok":true,"duration_ms":826}
+```
+
+JSONL 适合边运行边追加，也方便用 `jq` 流式分析：
 
 ```bash
 # 看工具调用分布
 jq -r 'select(.type=="tool_start") | .tool' .scout/traces.jsonl | sort | uniq -c
 
-# 看每步的 token 消耗和延迟
-jq -r 'select(.type=="llm_end") | "\(.step) \(.prompt_tokens) \(.latency_ms)ms"' .scout/traces.jsonl
+# 看失败的工具
+jq 'select(.type=="tool_end" and .ok==false)' .scout/traces.jsonl
+
+# 看每步的 token、缓存命中和延迟
+jq -r 'select(.type=="llm_end") |
+  "step=\(.step) prompt=\(.prompt_tokens) cached=\(.cached_tokens) latency=\(.latency_ms)ms"' \
+  .scout/traces.jsonl
+
+# 看子 Agent 的启动和结束
+jq 'select(.type=="subagent_start" or .type=="subagent_end")' .scout/traces.jsonl
 ```
 
-`llm_delta` 事件量太大且没有事后分析价值，落盘时跳过；超长字段截断到 500 字符——trace 是用来定位问题的，不是用来存档全文的。
+### 9.3 当前边界
+
+这是轻量级的 Agent 行为追踪，不是完整的生产级分布式可观测系统：
+
+- 不记录模型隐藏推理，也不保存完整 LLM 请求；
+- `llm_delta` 数量大且事后分析价值低，TraceRecorder 不落盘；
+- 超长字符串截断到 500 字符，trace 用于定位问题，不用于存档全文；
+- 数据只写本地 JSONL，没有跨服务 trace/span、指标聚合和告警；
+- 多线程子 Agent 共用 TraceRecorder，通过锁保证每行完整写入。
+
+它目前提供的是**运行进度展示 + 行为轨迹 + 基础性能/成本分析**。由于 Agent 只依赖 EventBus，将来增加 Web SSE、Prometheus 或 OpenTelemetry 订阅者时，不需要修改 Agent Loop。
 
 ## 10. 关键取舍
 
