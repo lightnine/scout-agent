@@ -100,6 +100,17 @@ if signatures.count(signature) >= REPEAT_LIMIT:
 
 实测这条提示能让模型立刻改变策略，比单纯限制步数有效得多。
 
+### 4.3 流式输出与工具执行时序
+
+Scout 默认开启流式（`stream=True`），但**流式只用于文本展示，不用于提前执行工具**：
+
+| 阶段 | 流式行为 | 工具行为 |
+| --- | --- | --- |
+| LLM 生成中 | 文本 token 通过 `on_delta` → `LLM_DELTA` 事件，CLI/Web 实时显示 | tool_call 的 `name` / `arguments` 在 `OpenAICompatClient._chat_stream` 里按 `index` 分片累积，**不 dispatch** |
+| `llm.chat()` 返回后 | 发出 `LLM_END` | `agent.py` 调用 `_run_tools()`，`ToolRegistry.execute_batch` 批量执行（只读则并行） |
+
+因此当前时序是：**整轮 assistant 消息（含完整 tool_calls）收齐 → 再执行工具**。这与 Claude Code 的 StreamingToolExecutor（tool_use block 一到即执行）不同；后者能把约 1s 的工具延迟藏进 5–30s 的模型生成窗口里。详见 [§13 后续演进](#13-后续演进) 中的优化项。
+
 ## 5. 工具系统
 
 ### 5.1 写工具 = 写普通函数
@@ -725,6 +736,7 @@ Web 端另有一条 Playwright 场景：它启动真实 FastAPI、Agent、RunMan
 按优先级：
 
 1. **评测集**：固定 20 个调研问题 + 人工标注答案，每次改提示词后回归打分。没有评测的提示词调优就是碰运气。
-2. **成本控制**：按 token 预算而不是步数限制，并按模型定价换算成金额展示。
-3. **更多数据源**：GitHub、内部知识库（对接现有 MCP server）。
-4. **抓取质量改进**：在保持依赖可控的前提下提升复杂页面处理能力。
+2. **Streaming Tool Execution（流式工具执行）**：当前实现必须等 `llm.chat()` 整轮返回后才调用 `_run_tools()`（见 [§4.3](#43-流式输出与工具执行时序)）。优化方向是在 `_chat_stream` 中检测某个 tool_call 的 arguments 已完整可解析时，通过 callback 增量 dispatch，使只读工具（如 `web_search`、`fetch_url`）在模型仍在生成后续内容时就开始执行。预期收益：单步 latency 下降，尤其模型一次请求多个工具或输出较长 reasoning 时。改动点：`llm/openai_compat.py`（流中检测完整 tool_call）、`core/agent.py`（从「整批后置」改为「流中增量 + 剩余 batch」）、需处理 OpenAI 协议下 assistant 消息与 tool 消息的严格配对，以及重复调用检测、计划确认门禁的时序。
+3. **成本控制**：按 token 预算而不是步数限制，并按模型定价换算成金额展示。
+4. **更多数据源**：GitHub、内部知识库（对接现有 MCP server）。
+5. **抓取质量改进**：在保持依赖可控的前提下提升复杂页面处理能力。
