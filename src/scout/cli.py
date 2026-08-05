@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,9 @@ HELP = """[bold]可用命令[/bold]
   /cost             查看本会话 token 消耗
   /help             显示本帮助
   /quit             退出
+
+运行过程中按 [bold]Ctrl+C[/bold] 可协作式取消当前任务（与 Web 停止按钮相同）；
+再按一次 Ctrl+C 强制退出。审批提示处也可输入 [bold]c[/bold] 取消。
 
 直接输入问题即可开始调研，例如：
   帮我调研一下 2026 年主流的开源向量数据库，对比它们的适用场景
@@ -273,14 +278,51 @@ def _handle_command(console: Console, runtime: Runtime, agent, session, command:
         console.print(f"[red]未知命令 /{command}，输入 /help 查看帮助[/red]")
 
 
+def _install_run_cancel_handler(
+    agent,
+    *,
+    on_cancel_requested: Callable[[], None] | None = None,
+) -> signal.Handlers:
+    """运行期间把 Ctrl+C 映射为 RunCancellation.request()。"""
+
+    def handle(_signum: int, _frame: object) -> None:
+        if agent.cancellation.is_cancelled():
+            raise KeyboardInterrupt
+        agent.cancellation.request()
+        if on_cancel_requested is not None:
+            on_cancel_requested()
+
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, handle)
+    return previous
+
+
+def _restore_signal_handler(previous: signal.Handlers) -> None:
+    signal.signal(signal.SIGINT, previous)
+
+
 def _ask(console: Console, agent, question: str, stream: bool) -> None:
     console.print()
-    result = agent.run(question, stream=stream)
+    previous = _install_run_cancel_handler(
+        agent,
+        on_cancel_requested=lambda: console.print(
+            "\n[yellow]正在取消运行…（再按 Ctrl+C 强制退出）[/yellow]"
+        ),
+    )
+    try:
+        result = agent.run(question, stream=stream)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]已强制退出。[/yellow]")
+        return
+    finally:
+        _restore_signal_handler(previous)
+
     if not stream and result.text:
         console.print(Markdown(result.text))
+    footer_style = "yellow" if result.stop_reason == "cancelled" else "dim"
     console.print(
-        f"\n[dim]— {result.steps} 步 · {result.tool_calls} 次工具调用 · "
-        f"{result.usage.total} tokens · {result.stop_reason}[/dim]"
+        f"\n[{footer_style}]— {result.steps} 步 · {result.tool_calls} 次工具调用 · "
+        f"{result.usage.total} tokens · {result.stop_reason}[/{footer_style}]"
     )
 
 

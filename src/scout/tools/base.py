@@ -14,7 +14,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
-from typing import Annotated, Any, Literal, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, get_origin
+
+if TYPE_CHECKING:
+    from ..cancellation import RunCancellation
+    from ..config import Settings
+    from ..core.session import Session
+    from ..llm.base import LLMClient
+    from ..memory.evidence import EvidenceStore
+    from ..memory.semantic import SemanticMemory
 
 CTX_PARAM = "ctx"
 
@@ -59,15 +67,15 @@ class ToolContext:
     """
 
     workspace: Path
-    settings: Any = None
-    llm: Any = None
-    memory: Any = None  # SemanticMemory：跨会话的长期记忆
-    evidence: Any = None  # EvidenceStore：本次调研抓到的原始资料
-    session: Any = None  # 当前会话（计划、来源编号都挂在上面）
-    spawn: Any = None  # Callable：派生子 Agent，由 Agent 注入
-    emit: Any = None  # Callable：向事件总线发事件
+    settings: Settings | None = None
+    llm: LLMClient | None = None
+    memory: SemanticMemory | None = None  # 跨会话的长期记忆
+    evidence: EvidenceStore | None = None  # 本次调研抓到的原始资料
+    session: Session | None = None  # 当前会话（计划、来源编号都挂在上面）
+    spawn: Callable[[str], str] | None = None  # 派生子 Agent，由 Agent 注入
+    emit: Callable[[str, dict[str, Any]], None] | None = None  # 向事件总线发事件
     run_id: str = ""
-    cancellation: Any = None  # RunCancellation：当前运行的取消令牌
+    cancellation: RunCancellation | None = None  # 当前运行的取消令牌
 
     def resolve(self, path: str) -> Path:
         """把工具传入的路径解析成绝对路径，并禁止逃出工作区。

@@ -210,22 +210,40 @@ class Store:
 
     # -------------------------------------------------------- 来源与证据
     def add_source(self, session_id: str, url: str, title: str) -> tuple[int, str, bool]:
-        """登记一个来源，返回 (source_id, 引用标签, 是否新建)。"""
-        existing = self._query(
-            "SELECT id, label FROM sources WHERE session_id=? AND url=?", (session_id, url)
-        )
-        if existing:
-            return int(existing[0]["id"]), existing[0]["label"], False
+        """登记一个来源，返回 (source_id, 引用标签, 是否新建)。
 
-        count = self._query(
-            "SELECT COUNT(*) AS c FROM sources WHERE session_id=?", (session_id,)
-        )[0]["c"]
-        label = f"S{count + 1}"
-        cursor = self._execute(
-            "INSERT INTO sources (session_id, label, url, title, fetched_at) VALUES (?,?,?,?,?)",
-            (session_id, label, url, title, time.time()),
-        )
-        return int(cursor.lastrowid or 0), label, True
+        查重、编号、插入在同一把锁内完成，避免并行 fetch_url / 子 Agent
+        并发 ingest 时出现重复 S 标签或同 URL 双写。
+        """
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT id, label FROM sources WHERE session_id=? AND url=?",
+                (session_id, url),
+            ).fetchall()
+            if existing:
+                return int(existing[0]["id"]), existing[0]["label"], False
+
+            count = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM sources WHERE session_id=?",
+                (session_id,),
+            ).fetchone()["c"]
+            label = f"S{count + 1}"
+            try:
+                cursor = self._conn.execute(
+                    "INSERT INTO sources (session_id, label, url, title, fetched_at) VALUES (?,?,?,?,?)",
+                    (session_id, label, url, title, time.time()),
+                )
+                self._conn.commit()
+                return int(cursor.lastrowid or 0), label, True
+            except sqlite3.IntegrityError:
+                self._conn.rollback()
+                row = self._conn.execute(
+                    "SELECT id, label FROM sources WHERE session_id=? AND url=?",
+                    (session_id, url),
+                ).fetchone()
+                if row is None:
+                    raise
+                return int(row["id"]), row["label"], False
 
     def list_sources(self, session_id: str) -> list[dict[str, Any]]:
         rows = self._query(

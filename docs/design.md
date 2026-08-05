@@ -109,7 +109,7 @@ Scout 默认开启流式（`stream=True`），但**流式只用于文本展示�
 | LLM 生成中 | 文本 token 通过 `on_delta` → `LLM_DELTA` 事件，CLI/Web 实时显示 | tool_call 的 `name` / `arguments` 在 `OpenAICompatClient._chat_stream` 里按 `index` 分片累积，**不 dispatch** |
 | `llm.chat()` 返回后 | 发出 `LLM_END` | `agent.py` 调用 `_run_tools()`，`ToolRegistry.execute_batch` 批量执行（只读则并行） |
 
-因此当前时序是：**整轮 assistant 消息（含完整 tool_calls）收齐 → 再执行工具**。这与 Claude Code 的 StreamingToolExecutor（tool_use block 一到即执行）不同；后者能把约 1s 的工具延迟藏进 5–30s 的模型生成窗口里。详见 [§13 后续演进](#13-后续演进) 中的优化项。
+因此当前时序是：**整轮 assistant 消息（含完整 tool_calls）收齐 → 再执行工具**。这与 Claude Code 的 StreamingToolExecutor（tool_use block 一到即执行）不同；后者能把约 1s 的工具延迟藏进 5–30s 的模型生成窗口里。详见 [§14.2](#142-streaming-tool-execution流式工具执行) 与 [§13 后续演进](#13-后续演进)。
 
 ## 5. 工具系统
 
@@ -205,6 +205,8 @@ def _safe_split_index(self) -> int:
 **（2）原始任务必须原文保留。** 摘要难免失真，一旦目标被改写，后面几十步全会跑偏。所以第一条 user 消息永远原样保留，只压缩它之后的内容。
 
 **（3）压缩只影响内存，不删数据库。** SQLite 里始终是完整的原始记录，压缩是为了省上下文，不是为了删历史。`/resume` 恢复的是完整对话。
+
+与 Claude Code 多层上下文管理的对比及 Scout 可改进方向，见 [§14.1](#141-上下文压缩context-compaction)。
 
 ### 6.2 证据库：让结论可追溯
 
@@ -736,7 +738,118 @@ Web 端另有一条 Playwright 场景：它启动真实 FastAPI、Agent、RunMan
 按优先级：
 
 1. **评测集**：固定 20 个调研问题 + 人工标注答案，每次改提示词后回归打分。没有评测的提示词调优就是碰运气。
-2. **Streaming Tool Execution（流式工具执行）**：当前实现必须等 `llm.chat()` 整轮返回后才调用 `_run_tools()`（见 [§4.3](#43-流式输出与工具执行时序)）。优化方向是在 `_chat_stream` 中检测某个 tool_call 的 arguments 已完整可解析时，通过 callback 增量 dispatch，使只读工具（如 `web_search`、`fetch_url`）在模型仍在生成后续内容时就开始执行。预期收益：单步 latency 下降，尤其模型一次请求多个工具或输出较长 reasoning 时。改动点：`llm/openai_compat.py`（流中检测完整 tool_call）、`core/agent.py`（从「整批后置」改为「流中增量 + 剩余 batch」）、需处理 OpenAI 协议下 assistant 消息与 tool 消息的严格配对，以及重复调用检测、计划确认门禁的时序。
+2. **Streaming Tool Execution（流式工具执行）**：当前实现必须等 `llm.chat()` 整轮返回后才调用 `_run_tools()`（见 [§4.3](#43-流式输出与工具执行时序)）。与 Claude Code 的差异及优化方向见 [§14.2](#142-streaming-tool-execution流式工具执行)。
 3. **成本控制**：按 token 预算而不是步数限制，并按模型定价换算成金额展示。
 4. **更多数据源**：GitHub、内部知识库（对接现有 MCP server）。
 5. **抓取质量改进**：在保持依赖可控的前提下提升复杂页面处理能力。
+
+## 14. 与 Claude Code 对比
+
+> 本节记录 Scout 与 Claude Code 在关键机制上的差异，便于后续演进时有明确参照。
+> Claude Code 侧细节来自社区逆向分析与公开讨论，**非 Anthropic 官方文档**，具体实现可能随版本变化。
+
+Scout 是从零手写的教学/实验型 Agent；Claude Code 是生产级 coding agent。两者目标相似（长任务、多轮工具、有限上下文），但工程深度差距明显。当前优先对比两个已在实现或演进清单中的主题：**上下文压缩**与 **Streaming Tool Execution**。
+
+### 14.1 上下文压缩（Context Compaction）
+
+#### Scout 当前做法
+
+`WorkingMemory.compact()` 是**单级 LLM 摘要**：
+
+1. `tokens()` 超过 `threshold`（默认 16000）触发；计数**不含** system prompt 与 runtime reminder（见 [§6.1](#61-上下文压缩难点不在摘要)、[§7](#7-上下文工程)）。
+2. 按**固定条数**保留最近 `keep_recent=8` 条作为 tail，其余 head 中 `#1～#split-1` 交给模型压成 ~600 字摘要。
+3. 首条 user 消息**原文钉住**；切点跳过 `tool` 角色，避免 `tool_call_id` 悬空（有回归测试 `test_compaction_never_orphans_tool_messages`）。
+4. 压缩**只动内存**，SQLite 仍存完整对话；证据库、语义记忆可作为部分兜底。
+
+**信息是否会丢？** 会——从**模型当前工作记忆**里丢掉细节（网页原文、中间推理），不是删数据库。若摘要漏掉关键事实且 evidence 里也没有，模型后续无法恢复。
+
+**相对粗暴之处：**
+
+| 点 | Scout | 影响 |
+| --- | --- | --- |
+| 切分维度 | 固定最近 8 **条** | 8 条里仍可能含超大 tool 输出 |
+| 触发依据 | 启发式 `estimate_tokens` | 可能该压未压，或压完仍接近超窗 |
+| 大 tool 输出 | 等 compact 时一并摘要 | 无「先卸载、后摘要」 |
+| 压缩后恢复 | 无 | 不会自动重读 evidence / 最近来源 |
+
+#### Claude Code 做法（据公开分析）
+
+采用**多层渐进压缩**，便宜手段优先、有损摘要靠后：
+
+```mermaid
+flowchart TD
+    A[每步 API 调用前] --> B[Micro-compact<br/>大 tool 输出 落盘，上下文留引用]
+    B --> C[Context collapse<br/>折叠工具过程，保留结论]
+    C --> D{上下文 ~83.5%?}
+    D -->|是| E[Auto-compact<br/>fork agent 结构化摘要]
+    D -->|否| F[正常请求]
+    E --> G[Rehydration<br/>重读最近文件、恢复 todo]
+    H[API context_length_exceeded] --> I[Reactive compact 紧急兜底]
+```
+
+要点对比：
+
+| 维度 | Scout | Claude Code |
+| --- | --- | --- |
+| 触发 | working 估算 token > 16000 | API 返回的真实 `usage`，约 83.5% 可用窗口 |
+| 大 tool 输出 | 压缩时一起摘要 | **Micro-compact**：落盘 + 上下文留指针 |
+| 压缩粒度 | 固定最近 8 条 | 按 **API round**（assistant 边界）分组丢弃 |
+| 摘要形式 | 通用中文 prompt，≤600 字 | 结构化：意图、决策、未完成任务、文件状态 |
+| 压缩后 | 无额外步骤 | **Rehydration**：重读最近 ~5 个文件、恢复 todo |
+| 跨压缩持久上下文 | evidence + semantic memory | **CLAUDE.md**（永不压缩）+ 磁盘 tool 输出 |
+| 手动控制 | 无 | `/compact [instructions]` |
+
+#### Scout 可借鉴的改进方向（尚未实现）
+
+1. **Micro-compact 思路**：超长 tool 输出只留 preview + 「全文见 evidence [S3]」。
+2. **按 token / round 切分**：替代固定 8 条。
+3. **用 API `usage` 触发**：替代纯估算。
+4. **压缩后 rehydration**：自动 `search_evidence` 或重拉最近引用来源。
+5. **结构化摘要 schema**：强制输出「目标 / 已证实事实 / 死胡同 / 待办」字段。
+
+对调研场景，证据库已部分补偿「摘要丢细节」；但若摘要把 `[Sx]` 引用写糊，仍可能重复搜索或引用错误。这也是 Scout 第一版在上下文工程上相对 Claude Code 差距最大的领域之一。
+
+### 14.2 Streaming Tool Execution（流式工具执行）
+
+#### Scout 当前做法
+
+见 [§4.3](#43-流式输出与工具执行时序)：
+
+| 阶段 | 行为 |
+| --- | --- |
+| LLM 流式生成中 | 文本 token → `LLM_DELTA`，UI 实时展示 |
+| tool_call 分片到达 | `_chat_stream` 按 `index` 累积 `name` / `arguments`，**不执行** |
+| `llm.chat()` 返回后 | `_run_tools()` → `execute_batch`（只读并行） |
+
+时序：**assistant 消息（含完整 tool_calls）收齐 → 再跑工具**。
+
+#### Claude Code 做法（据公开分析）
+
+**StreamingToolExecutor**：模型流式输出中，一旦某个 `tool_use` block 的 arguments 完整可解析，**立即 dispatch**，不必等整轮 assistant 结束。只读工具（读文件、搜索等）可在模型继续生成 reasoning 或后续 tool_call 时并行跑。
+
+预期收益：把约 1s 量级的工具延迟「藏」进 5–30s 的生成窗口，**单步 wall-clock latency 下降**；一次请求多个工具时 overlap 更明显。
+
+#### 差异与 Scout 落地难点
+
+| 维度 | Scout | Claude Code |
+| --- | --- | --- |
+| 工具启动时机 | 整轮 LLM 响应结束后 | arguments 完整即启动 |
+| 并行度 | batch 内只读并行 | 流中增量 + 与生成 overlap |
+| 协议约束 | 已实现「每 tool_call 必有 tool 消息」 | 同样严格，但时序更复杂 |
+
+Scout 若实现，主要改动点：
+
+- `llm/openai_compat.py`：流中检测 JSON arguments 已完整，通过 callback 抛出「可执行 tool_call」。
+- `core/agent.py`：从「整批后置」改为「流中增量 dispatch + 剩余 batch」。
+- 与现有机制对齐：**重复调用检测**、**计划确认门禁**（首次 `update_plan` 须批准后才能跑其他工具）、OpenAI 协议下 assistant / tool 消息严格配对。
+
+该项已列入 [§13](#13-后续演进) 优先级 #2；与上下文压缩并列，是当前与 Claude Code 差距最清晰、收益也可量化的两处。
+
+### 14.3 对比小结
+
+| 主题 | Scout 现状 | Claude Code（参考） | Scout 优先级 |
+| --- | --- | --- | --- |
+| 上下文压缩 | 单级摘要 + 固定 tail | 多层卸载/折叠/摘要 + rehydration | 高（见 §14.1 改进方向） |
+| 流式工具执行 | 整轮结束后 batch | 流中增量 dispatch | 高（§13 #2） |
+
+两者并非「Scout 错了」——而是 Scout 用更少代码验证了 Agent Loop 的主路径；上述差异是**有意识的第一版简化**，记录在案便于按需加深，而非盲目对齐 Claude Code 全栈。

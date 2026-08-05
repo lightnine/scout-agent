@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from scout.llm.base import Message, ToolCall
 from scout.memory.evidence import EvidenceStore, chunk_text
 from scout.memory.retrieval import cosine, keyword_score, tokenize
@@ -83,6 +85,36 @@ def test_evidence_is_isolated_per_session(store):
     first, second = store.create_session("a"), store.create_session("b")
     EvidenceStore(store, first).ingest("https://a.com", "A", "只属于第一个会话的内容" * 10)
     assert EvidenceStore(store, second).search("会话") == []
+
+
+def test_add_source_concurrent_distinct_urls(store):
+    session_id = store.create_session("t")
+    urls = [f"https://example.com/{index}" for index in range(24)]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda url: store.add_source(session_id, url, url), urls))
+
+    labels = [label for _, label, is_new in results if is_new]
+    assert len(labels) == len(urls)
+    assert len(set(labels)) == len(labels)
+    assert sorted(labels, key=lambda label: int(label[1:])) == [
+        f"S{index}" for index in range(1, len(urls) + 1)
+    ]
+    assert [source["label"] for source in store.list_sources(session_id)] == [
+        f"S{index}" for index in range(1, len(urls) + 1)
+    ]
+
+
+def test_add_source_concurrent_same_url(store):
+    session_id = store.create_session("t")
+    url = "https://example.com/same"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: store.add_source(session_id, url, "same"), range(24)))
+
+    assert sum(is_new for _, _, is_new in results) == 1
+    assert {label for _, label, _ in results} == {"S1"}
+    assert len(store.list_sources(session_id)) == 1
 
 
 # ------------------------------------------------------------------ 长期记忆

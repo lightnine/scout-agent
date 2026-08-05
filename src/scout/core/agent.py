@@ -17,6 +17,7 @@ from typing import Any
 from ..approval import ApprovalAction, ApprovalGateway, ApprovalKind, ApprovalRequest
 from ..cancellation import RunCancellation, RunCancelled
 from ..llm.base import LLMClient, Message, ToolCall, Usage
+from ..memory.semantic import SemanticMemory
 from ..memory.working import WorkingMemory
 from ..tools import SUBAGENT_TOOLS
 from ..tools.registry import ToolRegistry
@@ -58,7 +59,7 @@ class Agent:
         registry: ToolRegistry,
         bus: EventBus | None = None,
         *,
-        memory: Any = None,
+        memory: SemanticMemory | None = None,
         name: str = "main",
         role: str = "lead",
         working: WorkingMemory | None = None,
